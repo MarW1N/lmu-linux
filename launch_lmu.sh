@@ -13,7 +13,7 @@
 # Put environment variables in lmu.env in the same directory as this script
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 ENV_PATH="${SCRIPT_PATH}/launch_lmu.env"
-[ -f "$ENV_PATH" ] || { echo "Warning: Environment file $ENV_PATH not found. Exiting!" >> "$LOG_FILE"; exit 1; }
+[ -f "$ENV_PATH" ] || { notify "Warning: Environment file $ENV_PATH not found. Exiting!"; exit 1; }
 LOG_FILE="${SCRIPT_PATH}/launch_lmu.log"
 
 notify() {
@@ -31,9 +31,9 @@ if [ -f "$ENV_PATH" ]; then
 fi
 
 LMUBRIDGE_PATH="${SIMSHMBRIDGE_PATH}/lmubridge.exe"
-[ -f "$LMUBRIDGE_PATH" ] || { echo "Error: LMU Bridge executable not found at $LMUBRIDGE_PATH. Exiting!" >> "$LOG_FILE"; exit 1; }
+[ -f "$LMUBRIDGE_PATH" ] || { notify "Error: LMU Bridge executable not found at $LMUBRIDGE_PATH. Exiting!"; exit 1; }
 LMUSHM_PATH="${SIMSHMBRIDGE_PATH}/lmushm"
-[ -f "$LMUSHM_PATH" ] || { echo "Error: LMU Shared Memory executable not found at $LMUSHM_PATH. Exiting!" >> "$LOG_FILE"; exit 1; }
+[ -f "$LMUSHM_PATH" ] || { notify "Error: LMU Shared Memory executable not found at $LMUSHM_PATH. Exiting!"; exit 1; }
 
 if [ -n "$STEAM_COMPAT_TOOL_PATHS" ]; then
     echo "Detected Steam Proton environment."
