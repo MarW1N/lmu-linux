@@ -12,8 +12,8 @@
 # Set the path to the LMU Shared Memory Bridge and shared memory executable
 # Put environment variables in lmu.env in the same directory as this script
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-LAUNCH_LMU_ENV_FILE="${SCRIPT_PATH}/launch_lmu.env"
-[ -f "$LAUNCH_LMU_ENV_FILE" ] || { echo "Warning: Environment file $LAUNCH_LMU_ENV_FILE not found. Exiting!" >> "$LOG_FILE"; exit 1; }
+ENV_PATH="${SCRIPT_PATH}/launch_lmu.env"
+[ -f "$ENV_PATH" ] || { echo "Warning: Environment file $ENV_PATH not found. Exiting!" >> "$LOG_FILE"; exit 1; }
 LOG_FILE="${SCRIPT_PATH}/launch_lmu.log"
 
 notify() {
@@ -24,9 +24,9 @@ notify() {
 }
 
 # Read environment variables from the lmu.env file if it exists
-if [ -f "$LAUNCH_LMU_ENV_FILE" ]; then
+if [ -f "$ENV_PATH" ]; then
     set -a                 # Automatically export all variables defined after this point
-    source "$LAUNCH_LMU_ENV_FILE"     # Read the variables
+    source "$ENV_PATH"     # Read the variables
     set +a                 # Stop automatically exporting
 fi
 
@@ -55,21 +55,7 @@ if ! pgrep "$(basename "$LMUSHM_PATH")" > /dev/null; then
     "$LMUSHM_PATH" &
 fi
 
-# Start the bridge in the background, it will run until the game process closes.
-# We have to do this before launching the game to ensure the shared memory
-# is available when the game starts.
-# The bridge will also keep wineserver alive until the game exits,
-# preventing issues with missing shared memory.
-#(
-#    sleep 5
-#    notify "Starting $(basename "$LMUBRIDGE_PATH")..."
-#    
-#    "$PROTON_PATH" run "$LMUBRIDGE_PATH" 2>&1
-#    
-#    notify "Process $(basename "$LMUBRIDGE_PATH") has exited."
-#) &
-
-# watcher process, this kills lmubridge.exe when the game process closes,
+# Watcher process, this kills lmubridge.exe when the game process closes,
 # otherwise wineserver gets stuck and we have to kill it manually.
 (
     # Give the game 20 seconds to launch and appear in the process list
