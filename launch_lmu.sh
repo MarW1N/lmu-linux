@@ -21,7 +21,7 @@ export PROTON_NO_FSYNC=1
 export PROTON_ENABLE_NVAPI=1
 
 # Set the path to the LMU Shared Memory Bridge and shared memory executable
-$SIMSHMBRIDGE_PATH="$HOME/Apps/simshmbridge/bin"
+SIMSHMBRIDGE_PATH="${HOME}/Apps/simshmbridge/bin"
 
 LMU_BRIDGE="${SIMSHMBRIDGE_PATH}/lmubridge.exe /q"
 LMUSHM="${SIMSHMBRIDGE_PATH}/lmushm"
