@@ -12,7 +12,8 @@
 # Set the path to the LMU Shared Memory Bridge and shared memory executable
 # Put environment variables in lmu.env in the same directory as this script
 SIMSHMBRIDGE_PATH="${HOME}/Apps/simshmbridge/bin"
-LMU_ENV_FILE="${SIMSHMBRIDGE_PATH}/lmu.env"
+SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+LMU_ENV_FILE="${SCRIPT_PATH}/lmu.env"
 
 notify() {
     echo "[$(date +'%T')] $1" >> "$LOG_FILE"
@@ -28,7 +29,7 @@ if [ -f "$LMU_ENV_FILE" ]; then
     set +a                 # Stop automatically exporting
 fi
 
-LMU_BRIDGE="${SIMSHMBRIDGE_PATH}/lmubridge.exe /q"
+LMU_BRIDGE="${SIMSHMBRIDGE_PATH}/lmubridge.exe"
 LMUSHM="${SIMSHMBRIDGE_PATH}/lmushm"
 LOG_FILE="/tmp/lmu_launch.log"
 
@@ -36,7 +37,7 @@ if [ -n "$STEAM_COMPAT_TOOL_PATHS" ]; then
     echo "Detected Steam Proton environment."
     # Get the active Proton directory from the environment variable set by Steam
     ACTIVE_PROTON_DIR=$(echo "$STEAM_COMPAT_TOOL_PATHS" | cut -d':' -f1)
-    PROTON_CMD="$ACTIVE_PROTON_DIR/proton run"
+    PROTON_CMD="$ACTIVE_PROTON_DIR/proton"
 else
     echo "Error: This script is intended to be run from Steam with Proton. Exiting!"
     exit 1
@@ -46,7 +47,6 @@ fi
 if [ -f "$LOG_FILE" ]; then
     rm "$LOG_FILE"
 fi
-
 
 if ! pgrep "lmushm" > /dev/null; then
     notify "Starting lmushm..."
@@ -62,7 +62,7 @@ fi
     sleep 5
     notify "Starting lmubridge.exe..."
     
-    "${PROTON_CMD} ${LMUBRIDGE}" 2>&1
+    "$PROTON_CMD" run "$LMUBRIDGE" 2>&1
     
     notify "Process lmubridge.exe has exited."
 ) &
