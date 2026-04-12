@@ -9,31 +9,10 @@
 #
 # /path/to/launch_lmu.sh %command%
 
-# Optimization Flags
-export __GL_FSAA_MODE=0
-export __GL_LOG_MAX_ANISO=4
-export __GL_SHADER_DISK_CACHE=1
-export __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
-export DXVK_ASYNC=1
-export PROTON_ENABLE_WAYLAND=1
-export PROTON_NO_ESYNC=1
-export PROTON_NO_FSYNC=1
-export PROTON_ENABLE_NVAPI=1
-
 # Set the path to the LMU Shared Memory Bridge and shared memory executable
+# Put environment variables in lmu.env in the same directory as this script
 SIMSHMBRIDGE_PATH="${HOME}/Apps/simshmbridge/bin"
-
-LMU_BRIDGE="${SIMSHMBRIDGE_PATH}/lmubridge.exe /q"
-LMUSHM="${SIMSHMBRIDGE_PATH}/lmushm"
-LOG_FILE="/tmp/lmu_launch.log"
-# Get the active Proton directory from the environment variable set by Steam
-ACTIVE_PROTON_DIR=$(echo "$STEAM_COMPAT_TOOL_PATHS" | cut -d':' -f1)
-PROTON_CMD="$ACTIVE_PROTON_DIR/proton"
-
-# Clean up old log file if it exists
-if [ -f $LOG_FILE]; then
-    rm $LOG_FILE
-fi
+LMU_ENV_FILE="${SIMSHMBRIDGE_PATH}/lmu.env"
 
 notify() {
     echo "[$(date +'%T')] $1" >> "$LOG_FILE"
@@ -41,6 +20,33 @@ notify() {
         notify-send -a "LMU" -t 1000 "$1"
     fi
 }
+
+# Read environment variables from the lmu.env file if it exists
+if [ -f "$LMU_ENV_FILE" ]; then
+    set -a                 # Automatically export all variables defined after this point
+    source "$LMU_ENV_FILE"     # Read the variables
+    set +a                 # Stop automatically exporting
+fi
+
+LMU_BRIDGE="${SIMSHMBRIDGE_PATH}/lmubridge.exe /q"
+LMUSHM="${SIMSHMBRIDGE_PATH}/lmushm"
+LOG_FILE="/tmp/lmu_launch.log"
+
+if [ -n "$STEAM_COMPAT_TOOL_PATHS" ]; then
+    echo "Detected Steam Proton environment."
+    # Get the active Proton directory from the environment variable set by Steam
+    ACTIVE_PROTON_DIR=$(echo "$STEAM_COMPAT_TOOL_PATHS" | cut -d':' -f1)
+    PROTON_CMD="$ACTIVE_PROTON_DIR/proton run"
+else
+    echo "Error: This script is intended to be run from Steam with Proton. Exiting!"
+    exit 1
+fi
+
+# Clean up old log file if it exists
+if [ -f "$LOG_FILE" ]; then
+    rm "$LOG_FILE"
+fi
+
 
 if ! pgrep "lmushm" > /dev/null; then
     notify "Starting lmushm..."
@@ -56,7 +62,7 @@ fi
     sleep 5
     notify "Starting lmubridge.exe..."
     
-    "$PROTON_CMD" run "$LMUBRIDGE" 2>&1
+    "${PROTON_CMD} ${LMUBRIDGE}" 2>&1
     
     notify "Process lmubridge.exe has exited."
 ) &
