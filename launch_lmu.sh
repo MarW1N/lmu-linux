@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # This script is designed to launch Le Mans Ultimate
 # with the LMU Shared Memory Bridge (lmubridge.exe)
@@ -30,16 +30,36 @@ if [ -f "$ENV_PATH" ]; then
     set +a                 # Stop automatically exporting
 fi
 
+# Construct paths to the LMU Bridge and shared memory executables
 LMUBRIDGE_PATH="${SIMSHMBRIDGE_PATH}/lmubridge.exe"
-[ -f "$LMUBRIDGE_PATH" ] || { notify "Error: LMU Bridge executable not found at $LMUBRIDGE_PATH. Exiting!"; exit 1; }
 LMUSHM_PATH="${SIMSHMBRIDGE_PATH}/lmushm"
-[ -f "$LMUSHM_PATH" ] || { notify "Error: LMU Shared Memory executable not found at $LMUSHM_PATH. Exiting!"; exit 1; }
+
+# Validate that the required executables exist and are executable
+if ! [[ -f "$LMUSHM_PATH" && -x "$LMUSHM_PATH" ]]; then
+    notify "Error: LMU Shared Memory executable not found at $LMUSHM_PATH or not executable. Exiting!"
+    exit 1
+fi
+
+if ! [[ -f "$LMUBRIDGE_PATH" && -x "$LMUBRIDGE_PATH" ]]; then
+    notify "Error: LMU Bridge executable not found at $LMUBRIDGE_PATH or not executable. Exiting!"
+    exit 1
+fi
+
+if ! command -v protontricks-launch >/dev/null 2>&1; then
+    notify "Error: Cannot find protontricks-launch. Exiting!"
+    exit 1
+fi
 
 if [ -n "$STEAM_COMPAT_TOOL_PATHS" ]; then
     echo "Detected Steam Proton environment."
     # Get the active Proton directory from the environment variable set by Steam
     ACTIVE_PROTON_DIR=$(echo "$STEAM_COMPAT_TOOL_PATHS" | cut -d':' -f1)
     PROTON_PATH="$ACTIVE_PROTON_DIR/proton"
+
+    if ! [[ -f "$PROTON_PATH" && -x "$PROTON_PATH" ]]; then
+        notify "Error: Proton executable not found at $PROTON_PATH or not executable. Exiting!"
+        exit 1
+    fi
 else
     echo "Error: This script is intended to be run from Steam with Proton. Exiting!"
     exit 1
