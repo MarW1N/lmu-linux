@@ -16,12 +16,25 @@ ENV_PATH="${SCRIPT_PATH}/launch_lmu.env"
 [ -f "$ENV_PATH" ] || { notify "Warning: Environment file $ENV_PATH not found. Exiting!"; exit 1; }
 LOG_FILE="${SCRIPT_PATH}/launch_lmu.log"
 
+# Clean up old log file if it exists
+if [ -f "$LOG_FILE" ]; then
+    rm "$LOG_FILE"
+fi
+
+debuglog() {
+    if [ "$DEBUG" = true ]; then
+         echo "[$(date +'%T')] $1" >> "$LOG_FILE"
+    fi
+}
+
 notify() {
-    echo "[$(date +'%T')] $1" >> "$LOG_FILE"
+    debuglog "$1"
     if [ -n "$DISPLAY" ]; then
         notify-send -a "LMU" -t 1000 "$1"
     fi
 }
+
+debuglog "Environment file: $ENV_PATH"
 
 # Read environment variables from the lmu.env file if it exists
 if [ -f "$ENV_PATH" ]; then
@@ -33,6 +46,8 @@ fi
 # Construct paths to the LMU Bridge and shared memory executables
 LMUBRIDGE_PATH="${SIMSHMBRIDGE_PATH}/lmubridge.exe"
 LMUSHM_PATH="${SIMSHMBRIDGE_PATH}/lmushm"
+debuglog "lmubridge.exe path: $LMUBRIDGE_PATH"
+debuglog "lmushm path: $LMUSHM_PATH"
 
 # Validate that the required executables exist and are executable
 if ! [[ -f "$LMUSHM_PATH" && -x "$LMUSHM_PATH" ]]; then
@@ -65,10 +80,7 @@ else
     exit 1
 fi
 
-# Clean up old log file if it exists
-if [ -f "$LOG_FILE" ]; then
-    rm "$LOG_FILE"
-fi
+debuglog "Using Proton executable at: $PROTON_PATH"
 
 if ! pgrep "$(basename "$LMUSHM_PATH")" > /dev/null; then
     notify "Starting $(basename "$LMUSHM_PATH")..."
@@ -84,15 +96,41 @@ fi
     
     # Loop continuously as long as the game is running
     while pgrep -f "Le Mans Ultimate.exe" > /dev/null; do
+        debuglog "Le Mans Ultimate.exe is still running..."
+        
+        if pgrep -f "$(basename "$LMUBRIDGE_PATH")" > /dev/null; then
+            debuglog "$(basename "$LMUBRIDGE_PATH") is still running."
+        else
+            debuglog "$(basename "$LMUBRIDGE_PATH") is not running, but the game is"
+        fi
+
+        if pgrep -f "$(basename "$LMUSHM_PATH")" > /dev/null; then
+            debuglog "$(basename "$LMUSHM_PATH") is still running."
+        else
+            debuglog "$(basename "$LMUSHM_PATH") is not running, but the game is"
+        fi
+        
         sleep 10
     done
     
     # Once the loop breaks (game closed), kill the bridge to release wineserver
     notify "Game stopped! Closing $(basename "$LMUBRIDGE_PATH")..."
-    pkill -f "$(basename "$LMUBRIDGE_PATH")"
+    if pgrep -f "$(basename "$LMUBRIDGE_PATH")" > /dev/null; then
+        debuglog "Process $(basename "$LMUBRIDGE_PATH") running, attempting to kill..."
+        pkill -f "$(basename "$LMUBRIDGE_PATH")"
+        if [ $? -eq 0 ]; then
+            notify "Process killed: $(basename "$LMUBRIDGE_PATH")"
+        else
+            notify "Failed to kill $(basename "$LMUBRIDGE_PATH")"
+        fi
+    else
+        debuglog "$(basename "$LMUBRIDGE_PATH") is not running, no need to kill."
+    fi
+
 ) &
 
 notify "Starting Le Mans Ultimate..."
+debuglog "Using gamemoderun: $(which gamemoderun)"
 # Run the game in the foreground to ensure the script waits for it to exit
 # before killing the bridge and shared memory processes.
 # The bridge will keep wineserver alive until the game exits,
@@ -100,5 +138,14 @@ notify "Starting Le Mans Ultimate..."
 gamemoderun "$@" & sleep 5 && $PROTON_PATH run $LMUBRIDGE_PATH
 
 # Kill the shared memory process
-notify "Killing process $(basename "$LMUSHM_PATH")..."
-pkill "$(basename "$LMUSHM_PATH")"
+if pgrep "$(basename "$LMUSHM_PATH")" > /dev/null; then
+    debuglog "Process $(basename "$LMUSHM_PATH") is running, attempting to kill..."
+    pkill "$(basename "$LMUSHM_PATH")"
+    if [  $? -eq 0 ]; then
+        notify "Process killed: $(basename "$LMUSHM_PATH")"
+    else
+        notify "Process $(basename "$LMUSHM_PATH") was not running or failed to kill."
+    fi
+else
+    debuglog "Process $(basename "$LMUSHM_PATH") is not running, no need to kill."
+fi
