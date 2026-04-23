@@ -46,7 +46,7 @@ if ! [[ -f "$LMUBRIDGE_PATH" && -x "$LMUBRIDGE_PATH" ]]; then
 fi
 
 if ! command -v protontricks-launch >/dev/null 2>&1; then
-    notify "Error: Cannot find protontricks-launch. Exiting!"
+    notify "Error: protontricks-launch could not be found. Exiting!"
     exit 1
 fi
 
@@ -72,7 +72,8 @@ fi
 
 if ! pgrep "$(basename "$LMUSHM_PATH")" > /dev/null; then
     notify "Starting $(basename "$LMUSHM_PATH")..."
-    "$LMUSHM_PATH" &
+    # Feed an open, silent pipe into stdin to make poll() wait instead of loop
+    tail -f /dev/null | "$LMUSHM_PATH" &
 fi
 
 # Watcher process, this kills lmubridge.exe when the game process closes,
@@ -101,4 +102,3 @@ gamemoderun "$@" & sleep 5 && $PROTON_PATH run $LMUBRIDGE_PATH
 # Kill the shared memory process
 notify "Killing process $(basename "$LMUSHM_PATH")..."
 pkill "$(basename "$LMUSHM_PATH")"
-
