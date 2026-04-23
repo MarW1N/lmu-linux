@@ -36,6 +36,15 @@ notify() {
 
 debuglog "Environment file: $ENV_PATH"
 
+# Checking for necessary commands before proceeding
+commands=("gamemoderun" "notify-send" "pgrep" "pkill" "protontricks-launch")
+for cmd in "${commands[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        debuglog "Error: Required command '$cmd' not found. Please install it and try again. Exiting!"
+        exit 1
+    fi
+done
+
 # Read environment variables from the lmu.env file if it exists
 if [ -f "$ENV_PATH" ]; then
     set -a                 # Automatically export all variables defined after this point
@@ -57,11 +66,6 @@ fi
 
 if ! [[ -f "$LMUBRIDGE_PATH" && -x "$LMUBRIDGE_PATH" ]]; then
     notify "Error: LMU Bridge executable not found at $LMUBRIDGE_PATH or not executable. Exiting!"
-    exit 1
-fi
-
-if ! command -v protontricks-launch >/dev/null 2>&1; then
-    notify "Error: protontricks-launch could not be found. Exiting!"
     exit 1
 fi
 
