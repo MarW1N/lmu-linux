@@ -8,10 +8,10 @@ I have other plans for other software I use as well, such as CrewChief (https://
 ## Configuration
 
 ### simshm and lmubridge.exe
-Uncomment SIMSHMBRIDGE_DIR and make sure the path points to a location containing simshm and lmubridge.exe
+Uncomment SIMSHMBRIDGE_DIR and make sure the path points to a directory containing *simshm* and *lmubridge.exe* binaries.
 
 ### LMUFFB
-Uncomment LMUFFB_DIR and make sure it contains the LMUFFB.exe binary
+Uncomment LMUFFB_DIR and make sure it points to a path containing *LMUFFB.exe* binary.
 
 ### Debug logging
 Debug logging can be activated by uncommenting "DEBUG=true" in launch_lmu.env. This will create launch_lmu.log in the same folder as the script. 
