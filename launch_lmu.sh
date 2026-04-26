@@ -52,11 +52,13 @@ if [ -f "$ENV_PATH" ]; then
     set +a                 # Stop automatically exporting
 fi
 
-# Construct paths to the LMU Bridge and shared memory executables
+# Construct paths to executables based on the environment variables
 LMUBRIDGE_PATH="${SIMSHMBRIDGE_PATH}/lmubridge.exe"
 LMUSHM_PATH="${SIMSHMBRIDGE_PATH}/lmushm"
+LMUFFB_PATH="${LMUFFB_PATH}/LMUFFB.exe"
 debuglog "lmubridge.exe path: $LMUBRIDGE_PATH"
 debuglog "lmushm path: $LMUSHM_PATH"
+debuglog "LMUFFB.exe path: $LMUFFB_PATH"
 
 # Validate that the required executables exist and are executable
 if ! [[ -f "$LMUSHM_PATH" && -x "$LMUSHM_PATH" ]]; then
@@ -133,19 +135,26 @@ fi
 
 ) &
 
+run_lmuffb() {
+    if [ -n "$LMUFFB_PATH" ] && [ -f "$LMUFFB_PATH" ] && [ -x "$LMUFFB_PATH" ]; then
+        debuglog "Starting LMUFFB..."
+        $PROTON_PATH run "$LMUFFB_PATH" &
+    fi
+}
+
 notify "Starting Le Mans Ultimate..."
 debuglog "Using gamemoderun: $(which gamemoderun)"
 # Run the game in the foreground to ensure the script waits for it to exit
 # before killing the bridge and shared memory processes.
 # The bridge will keep wineserver alive until the game exits,
 # preventing issues with missing shared memory.
-gamemoderun "$@" & sleep 5 && $PROTON_PATH run $LMUBRIDGE_PATH
+gamemoderun "$@" & sleep 5 && $PROTON_PATH run $LMUBRIDGE_PATH && run_lmuffb
 
 # Kill the shared memory process
 if pgrep "$(basename "$LMUSHM_PATH")" > /dev/null; then
     debuglog "Process $(basename "$LMUSHM_PATH") is running, attempting to kill..."
     pkill "$(basename "$LMUSHM_PATH")"
-    if [  $? -eq 0 ]; then
+    if [ $? -eq 0 ]; then
         notify "Process killed: $(basename "$LMUSHM_PATH")"
     else
         notify "Process $(basename "$LMUSHM_PATH") was not running or failed to kill."
