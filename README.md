@@ -1,27 +1,17 @@
 # Description
-launch_lmu.sh is a script that helps launch LMU together with lmushm and lmubridge.exe from https://github.com/Spacefreak18/simshmbridge
+I made this launch_lmu.sh to make it easier for myself to launch LMU so that I can use TinyPedal (https://github.com/TinyPedal/TinyPedal) using the native LMU API with the help of *lmushm* and *lmubridge.exe* from https://github.com/Spacefreak18/simshmbridge and thought someone else might find it useful. Then I found the excellent LMUFFB (https://github.com/coasting-nc/LMUFFB) to make use of LMU telemetry to enhance the force feedback and incorporated that as well. I have other plans for other software I use as well, such as CrewChief (https://gitlab.com/mr_belowski/CrewChiefV4) so that might happen as well.
 
-The script should be invoked using Steam Launch Options as below
+## Configuration
+Debug logging can be activated by uncommenting "DEBUG=true" in launch_lmu.env. This will create launch_lmu.log in the same folder as the script. 
 
+### simshm and lmubridge.exe
+Uncomment SIMSHMBRIDGE_DIR and make sure the path points to a location containing simshm and lmubridge.exe
+
+### LMUFFB
+Uncomment LMUFFB_DIR and make sure it contains the LMUFFB.exe binary
+
+## Usage:
+- In Steam launch options for Le Mans Ultimate
 /some/path/launch_lmu.sh %command%
+- Launch Le Mans Ultimate and have some fun
 
-Debug logging can be activated by uncommenting "DEBUG=true" in launch_lmu.env. This will create launch_lmu.log in the same folder as the script. Below is example output from starting and stopping LMU.
-
-```
-<launching game in Steam here>
-[16:57:50] lmubridge.exe path: /home/user/Apps/simshmbridge/bin/lmubridge.exe
-[16:57:50] lmushm path: /home/user/Apps/simshmbridge/bin/lmushm
-[16:57:50] Using Proton executable at: /home/user/.local/share/Steam/compatibilitytools.d/GE-Proton10-34-LMU-hid_fixes/proton
-[16:57:51] Starting lmushm...
-[16:57:51] Starting Le Mans Ultimate...
-[16:57:51] Using gamemoderun: /usr/games/gamemoderun
-[16:58:01] Le Mans Ultimate.exe is still running...
-[16:58:01] lmubridge.exe is still running.
-[16:58:01] lmushm is still running.
-<stopping game here>
-[16:58:32] Game stopped! Closing lmubridge.exe...
-[16:58:32] Process lmubridge.exe running, attempting to kill...
-[16:58:33] Process killed: lmubridge.exe
-[16:58:33] Process lmushm is running, attempting to kill...
-[16:58:33] Process killed: lmushm
-```
