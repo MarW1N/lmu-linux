@@ -1,164 +1,280 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-# This script is designed to launch Le Mans Ultimate
-# with the LMU Shared Memory Bridge (lmubridge.exe)
-# and the shared memory process (LMUSHM_PATH) on Linux using Proton.
-# It also includes optimizations for better performance
-# and a simple notification system to track the launch process.
+# Save Steam's LD_PRELOAD and clear it so helper commands don't emit ELFCLASS32 warnings
+STEAM_LD_PRELOAD="${LD_PRELOAD-}"
+unset LD_PRELOAD
+
 # Launch LMU from Steam with these launch options:
-#
 # /path/to/launch_lmu.sh %command%
 
-# Set the path to the LMU Shared Memory Bridge and shared memory executable
-# Put environment variables in lmu.env in the same directory as this script
+# Get the path to the directory containing this script
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-ENV_PATH="${SCRIPT_PATH}/launch_lmu.env"
-[ -f "$ENV_PATH" ] || { notify "Warning: Environment file $ENV_PATH not found. Exiting!"; exit 1; }
+
+# Define the path to the log file for debug logging
 LOG_FILE="${SCRIPT_PATH}/launch_lmu.log"
 
-# Clean up old log file if it exists
-if [ -f "$LOG_FILE" ]; then
-    rm "$LOG_FILE"
-fi
+# Start a fresh log and capture all launcher output while keeping it visible
+: > "$LOG_FILE"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "####### BEGIN LAUNCH_LMU.SH LOG #######"
+
+# Logging functions using Bash built-in timestamps
+errlog() {
+    printf '[%(%T)T] ERROR: %s\n' -1 "$1" >&2
+}
 
 debuglog() {
-    if [ "$DEBUG" = true ]; then
-         echo "[$(date +'%T')] $1" >> "$LOG_FILE"
+    if [[ "${DEBUG:-false}" == true ]]; then
+        printf '[%(%T)T] DEBUG: %s\n' -1 "$1" >&2
     fi
 }
 
-notify() {
-    debuglog "$1"
-    if [ -n "$DISPLAY" ]; then
-        notify-send -a "LMU" -t 1000 "$1"
-    fi
-}
+# Read environment variables from launch_lmu.env
+ENV_PATH="${SCRIPT_PATH}/launch_lmu.env"
+if [[ -f "$ENV_PATH" ]]; then
+    printf 'Environment file: %s\n' "$ENV_PATH"
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_PATH"
+    set +a
+else
+    errlog "Environment file $ENV_PATH not found. Exiting!"
+    exit 1
+fi
 
-debuglog "Environment file: $ENV_PATH"
+DEBUG="${DEBUG:-false}"
+if [[ "$DEBUG" != true && "$DEBUG" != false ]]; then
+    errlog "DEBUG must be true or false, got: $DEBUG"
+    exit 1
+fi
 
-# Checking for necessary commands before proceeding
-commands=("gamemoderun" "notify-send" "pgrep" "pkill" "protontricks-launch")
-for cmd in "${commands[@]}"; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        debuglog "Error: Required command '$cmd' not found. Please install it and try again. Exiting!"
+require_executable() {
+    local variable_name="$1"
+    local executable_path="$2"
+    local description="$3"
+
+    if [[ -z "$executable_path" ]]; then
+        errlog "Set $variable_name in $ENV_PATH."
+        exit 1
+    elif [[ ! -f "$executable_path" || ! -x "$executable_path" ]]; then
+        errlog "$description is not an executable file: $executable_path"
         exit 1
     fi
+    debuglog "Found $description at: $executable_path"
+}
+
+require_command() {
+    local command_name="$1"
+
+    if ! command -v "$command_name" >/dev/null 2>&1; then
+        errlog "Required command not found: $command_name"
+        exit 1
+    fi
+    debuglog "Found command: $command_name"
+}
+
+# Check required commands and executables before doing any work
+commands=("gamemoderun" "jq" "notify-send" "pgrep" "pkill")
+for cmd in "${commands[@]}"; do
+    require_command "$cmd"
 done
 
-# Read environment variables from the lmu.env file if it exists
-if [ -f "$ENV_PATH" ]; then
-    set -a                 # Automatically export all variables defined after this point
-    source "$ENV_PATH"     # Read the variables
-    set +a                 # Stop automatically exporting
+if [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
+    require_executable LMUBRIDGE_BIN "$LMUBRIDGE_BIN" "LMU Shared Memory Bridge executable"
+fi
+if [[ -n "${LMUSHM_BIN:-}" ]]; then
+    require_executable LMUSHM_BIN "$LMUSHM_BIN" "LMU Shared Memory executable"
+fi
+if [[ -n "${LMUFFB_BIN:-}" ]]; then
+    require_executable LMUFFB_BIN "$LMUFFB_BIN" "LMUFFB executable"
+fi
+if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
+    require_executable CREWCHIEF_BIN "${CREWCHIEF_BIN:-}" "CrewChief executable"
+    require_command "protontricks-launch"
 fi
 
-# Construct paths to executables based on the environment variables
-LMUBRIDGE_PATH="${SIMSHMBRIDGE_PATH}/lmubridge.exe"
-LMUSHM_PATH="${SIMSHMBRIDGE_PATH}/lmushm"
-LMUFFB_PATH="${LMUFFB_PATH}/LMUFFB.exe"
-debuglog "lmubridge.exe path: $LMUBRIDGE_PATH"
-debuglog "lmushm path: $LMUSHM_PATH"
-debuglog "LMUFFB.exe path: $LMUFFB_PATH"
-
-# Validate that the required executables exist and are executable
-if ! [[ -f "$LMUSHM_PATH" && -x "$LMUSHM_PATH" ]]; then
-    notify "Error: LMU Shared Memory executable not found at $LMUSHM_PATH or not executable. Exiting!"
+if [[ -z "${STEAM_COMPAT_TOOL_PATHS:-}" ]]; then
+    errlog "This script must be launched by Steam with Proton."
     exit 1
 fi
 
-if ! [[ -f "$LMUBRIDGE_PATH" && -x "$LMUBRIDGE_PATH" ]]; then
-    notify "Error: LMU Bridge executable not found at $LMUBRIDGE_PATH or not executable. Exiting!"
+ACTIVE_PROTON_DIR="${STEAM_COMPAT_TOOL_PATHS%%:*}"
+export PROTON_PATH="$ACTIVE_PROTON_DIR/proton"
+if [[ ! -x "$PROTON_PATH" ]]; then
+    errlog "Proton executable is missing or not executable: $PROTON_PATH"
     exit 1
 fi
-
-if [ -n "$STEAM_COMPAT_TOOL_PATHS" ]; then
-    echo "Detected Steam Proton environment."
-    # Get the active Proton directory from the environment variable set by Steam
-    ACTIVE_PROTON_DIR=$(echo "$STEAM_COMPAT_TOOL_PATHS" | cut -d':' -f1)
-    PROTON_PATH="$ACTIVE_PROTON_DIR/proton"
-
-    if ! [[ -f "$PROTON_PATH" && -x "$PROTON_PATH" ]]; then
-        notify "Error: Proton executable not found at $PROTON_PATH or not executable. Exiting!"
-        exit 1
-    fi
-else
-    echo "Error: This script is intended to be run from Steam with Proton. Exiting!"
-    exit 1
-fi
-
 debuglog "Using Proton executable at: $PROTON_PATH"
 
-if ! pgrep "$(basename "$LMUSHM_PATH")" > /dev/null; then
-    notify "Starting $(basename "$LMUSHM_PATH")..."
-    # Feed an open, silent pipe into stdin to make poll() wait instead of loop
-    tail -f /dev/null | "$LMUSHM_PATH" &
+# Dynamically locate the Le Mans Ultimate installation directory and Settings.JSON
+LMU_INSTALL_DIR="${STEAM_COMPAT_INSTALL_PATH:-}"
+if [[ -z "$LMU_INSTALL_DIR" ]]; then
+    for arg in "$@"; do
+        if [[ "$arg" == *"/Le Mans Ultimate/"* ]]; then
+            LMU_INSTALL_DIR="${arg%%/Le Mans Ultimate*}/Le Mans Ultimate"
+            break
+        fi
+    done
+fi
+if [[ -z "$LMU_INSTALL_DIR" ]]; then
+    for lib in ${STEAM_COMPAT_LIBRARY_PATHS:-}; do
+        if [[ -d "${lib}/steamapps/common/Le Mans Ultimate" ]]; then
+            LMU_INSTALL_DIR="${lib}/steamapps/common/Le Mans Ultimate"
+            break
+        fi
+    done
 fi
 
-# Watcher process, this kills lmubridge.exe when the game process closes,
-# otherwise wineserver gets stuck and we have to kill it manually.
-(
-    # Give the game 20 seconds to launch and appear in the process list
-    sleep 10
-    
-    # Loop continuously as long as the game is running
-    while pgrep -f "Le Mans Ultimate.exe" > /dev/null; do
-        debuglog "Le Mans Ultimate.exe is still running..."
-        
-        if pgrep -f "$(basename "$LMUBRIDGE_PATH")" > /dev/null; then
-            debuglog "$(basename "$LMUBRIDGE_PATH") is still running."
-        else
-            debuglog "$(basename "$LMUBRIDGE_PATH") is not running, but the game is"
-        fi
+LMU_SETTINGS_ORG="${LMU_INSTALL_DIR}/UserData/player/Settings.JSON"
 
-        if pgrep -f "$(basename "$LMUSHM_PATH")" > /dev/null; then
-            debuglog "$(basename "$LMUSHM_PATH") is still running."
-        else
-            debuglog "$(basename "$LMUSHM_PATH") is not running, but the game is"
-        fi
-        
-        sleep 10
+if [[ -f "$LMU_SETTINGS_ORG" ]]; then
+    LMU_SETTINGS_TMP="$(mktemp /tmp/lmu_settings.XXXXXX.json)"
+    
+    jq \
+      --arg qc1 "${QUICK_CHAT_1:-}" \
+      --arg qc2 "${QUICK_CHAT_2:-}" \
+      --arg qc3 "${QUICK_CHAT_3:-}" \
+      --arg qc4 "${QUICK_CHAT_4:-}" \
+      --arg qc5 "${QUICK_CHAT_5:-}" \
+      --arg qc6 "${QUICK_CHAT_6:-}" \
+      --arg qc7 "${QUICK_CHAT_7:-}" \
+      --arg qc8 "${QUICK_CHAT_8:-}" \
+      --arg qc9 "${QUICK_CHAT_9:-}" \
+      --arg qc10 "${QUICK_CHAT_10:-}" \
+      --arg qc11 "${QUICK_CHAT_11:-}" \
+      --arg qc12 "${QUICK_CHAT_12:-}" \
+      '.CHAT |= (
+        if $qc1 != "" then . + {"Quick Chat #1": $qc1} else . end |
+        if $qc2 != "" then . + {"Quick Chat #2": $qc2} else . end |
+        if $qc3 != "" then . + {"Quick Chat #3": $qc3} else . end |
+        if $qc4 != "" then . + {"Quick Chat #4": $qc4} else . end |
+        if $qc5 != "" then . + {"Quick Chat #5": $qc5} else . end |
+        if $qc6 != "" then . + {"Quick Chat #6": $qc6} else . end |
+        if $qc7 != "" then . + {"Quick Chat #7": $qc7} else . end |
+        if $qc8 != "" then . + {"Quick Chat #8": $qc8} else . end |
+        if $qc9 != "" then . + {"Quick Chat #9": $qc9} else . end |
+        if $qc10 != "" then . + {"Quick Chat #10": $qc10} else . end |
+        if $qc11 != "" then . + {"Quick Chat #11": $qc11} else . end |
+        if $qc12 != "" then . + {"Quick Chat #12": $qc12} else . end
+      )' "$LMU_SETTINGS_ORG" > "$LMU_SETTINGS_TMP" && mv -f "$LMU_SETTINGS_TMP" "$LMU_SETTINGS_ORG"
+    debuglog "Updated Settings.JSON chat mappings successfully at: $LMU_SETTINGS_ORG"
+else
+    debuglog "Settings.JSON not found at $LMU_SETTINGS_ORG, skipping chat updates."
+fi
+
+# Ensure old instances aren't stuck in the background
+if [[ -n "${LMUBRIDGE_BIN:-}" ]] && pgrep -f "lmubridge.exe" >/dev/null; then
+    errlog "LMU Shared Memory Bridge is already running. Please close it before launching LMU."
+    exit 1
+fi
+
+if [[ -n "${LMUFFB_BIN:-}" ]] && pgrep -f "LMUFFB.exe" >/dev/null; then
+    errlog "LMUFFB is already running. Please close it before launching LMU."
+    exit 1
+fi
+
+if [[ -n "${CREWCHIEF_BIN:-}" ]] && pgrep -f "CrewChiefV4.exe" >/dev/null; then
+    errlog "CrewChief is already running. Please close it before launching LMU."
+    exit 1
+fi
+
+# Start lmushm if configured and not already running
+if [[ -n "${LMUSHM_BIN:-}" ]]; then
+    if ! pgrep -f "$LMUSHM_BIN" >/dev/null; then
+        debuglog "Starting lmushm..."
+        ( tail -f /dev/null | "$LMUSHM_BIN" ) >/dev/null 2>&1 &
+    else
+        debuglog "lmushm is already running."
+    fi
+fi
+
+# 1. Wait for Le Mans Ultimate.exe to appear, then launch lmubridge using Proton's direct wine64
+if [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
+    (
+    while ! pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
+        sleep 1
     done
     
-    # Once the loop breaks (game closed), kill the bridge to release wineserver
-    notify "Game stopped! Closing $(basename "$LMUBRIDGE_PATH")..."
-    if pgrep -f "$(basename "$LMUBRIDGE_PATH")" > /dev/null; then
-        debuglog "Process $(basename "$LMUBRIDGE_PATH") running, attempting to kill..."
-        pkill -f "$(basename "$LMUBRIDGE_PATH")"
-        if [ $? -eq 0 ]; then
-            notify "Process killed: $(basename "$LMUBRIDGE_PATH")"
-        else
-            notify "Failed to kill $(basename "$LMUBRIDGE_PATH")"
-        fi
-    else
-        debuglog "$(basename "$LMUBRIDGE_PATH") is not running, no need to kill."
-    fi
+    sleep 3
+    debuglog "Launching lmubridge.exe via direct Proton wine64..."
+    
+    STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH" \
+    WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx" \
+    "$ACTIVE_PROTON_DIR/files/bin/wine64" "$LMUBRIDGE_BIN" &
+    ) &
+fi
 
+# 2. Wait a bit longer, then launch LMUFFB directly from its directory subshell
+if [[ -n "${LMUFFB_BIN:-}" ]]; then
+    (
+    while ! pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
+        sleep 1
+    done
+    sleep 8
+    debuglog "Starting LMUFFB directly from its directory..."
+
+    LMUFFB_DIR="${LMUFFB_BIN%/*}"
+    LMUFFB_EXE="${LMUFFB_BIN##*/}"
+
+    if [[ -d "$LMUFFB_DIR" ]]; then
+        cd "$LMUFFB_DIR" || exit 1
+        STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH" \
+        WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx" \
+        "$ACTIVE_PROTON_DIR/files/bin/wine64" "./$LMUFFB_EXE" &
+    else
+        errlog "LMUFFB directory not found: $LMUFFB_DIR"
+    fi
+    ) &
+fi
+
+# 3. Launch CrewChief when its executable is configured
+if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
+    (
+        while ! pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
+            sleep 1
+        done
+        
+        sleep 5
+        debuglog "Starting CrewChief..."
+        
+        export WINEDEBUG="-winegstreamer,-gstreamer"
+        export WINEDLLOVERRIDES="winegstreamer=d"
+        export LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+        
+        protontricks-launch --no-runtime --appid 2399420 "$CREWCHIEF_BIN" >> "${SCRIPT_PATH}/CrewChiefLauncher.log" 2>&1 &
+        
+        # Wait for CrewChief to start and renice it to 19
+        while ! pgrep -f "CrewChiefV4.exe" >/dev/null; do
+            sleep 1
+        done
+        
+        local cc_pid
+        cc_pid=$(pgrep -f "CrewChiefV4.exe" | head -n1)
+        if [[ -n "$cc_pid" ]]; then
+            renice -n 19 -p "$cc_pid" >/dev/null 2>&1 || true
+            debuglog "Reniced CrewChiefV4.exe (PID $cc_pid) to 19"
+        fi
+    ) &
+fi
+
+# 4. Cleanup loop (waits 45s initially so slow startups don't trigger early kills)
+(
+    sleep 45
+    while pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
+        sleep 5
+    done
+
+    debuglog "Le Mans Ultimate closed. Terminating helper processes..."
+    pkill -f "lmubridge.exe" || true
+    pkill -f "lmushm" || true
+    pkill -f "LMUFFB.exe" || true
+    if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
+        pkill -f "CrewChiefV4.exe" || true
+    fi
 ) &
 
-run_lmuffb() {
-    if [ -n "$LMUFFB_PATH" ] && [ -f "$LMUFFB_PATH" ] && [ -x "$LMUFFB_PATH" ]; then
-        debuglog "Starting LMUFFB..."
-        $PROTON_PATH run "$LMUFFB_PATH" &
-    fi
-}
-
-notify "Starting Le Mans Ultimate..."
-debuglog "Using gamemoderun: $(which gamemoderun)"
-# Run the game in the foreground to ensure the script waits for it to exit
-# before killing the bridge and shared memory processes.
-# The bridge will keep wineserver alive until the game exits,
-# preventing issues with missing shared memory.
-gamemoderun "$@" & sleep 5 && $PROTON_PATH run $LMUBRIDGE_PATH && run_lmuffb
-
-# Kill the shared memory process
-if pgrep "$(basename "$LMUSHM_PATH")" > /dev/null; then
-    debuglog "Process $(basename "$LMUSHM_PATH") is running, attempting to kill..."
-    pkill "$(basename "$LMUSHM_PATH")"
-    if [ $? -eq 0 ]; then
-        notify "Process killed: $(basename "$LMUSHM_PATH")"
-    else
-        notify "Process $(basename "$LMUSHM_PATH") was not running or failed to kill."
-    fi
-else
-    debuglog "Process $(basename "$LMUSHM_PATH") is not running, no need to kill."
-fi
+# 5. Keep the main game in the foreground
+export LD_PRELOAD="$STEAM_LD_PRELOAD"
+gamemoderun "$@"
