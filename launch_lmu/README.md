@@ -13,8 +13,10 @@ Uncomment SIMSHMBRIDGE_DIR and make sure the path points to a directory containi
 ### LMUFFB
 Uncomment LMUFFB_DIR and make sure it points to a path containing *LMUFFB.exe* binary.
 
-### Debug logging
-Debug logging can be activated by uncommenting "DEBUG=true" in launch_lmu.env. This will create launch_lmu.log in the same folder as the script. 
+### Logging
+Launcher, game, and helper-process output is written to `logs/launch_lmu.log`. The active log and up to nine uncompressed, numbered archives (for example, `launch_lmu.log.1`) are kept in the `logs` folder.
+
+Debug logging can be activated by uncommenting `DEBUG=true` in `launch_lmu.env`.
 
 ## Invocation of script
 - In Steam launch options for Le Mans Ultimate `/some/path/launch_lmu.sh %command%`

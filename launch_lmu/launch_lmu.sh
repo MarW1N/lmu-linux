@@ -11,10 +11,27 @@ unset LD_PRELOAD
 # Get the path to the directory containing this script
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
-# Define the path to the log file for debug logging
-LOG_FILE="${SCRIPT_PATH}/launch_lmu.log"
+# Keep the active log and numbered archives together under logs/.
+LOG_DIR="${SCRIPT_PATH}/logs"
+[ ! -d "$LOG_DIR" ] && mkdir -p "$LOG_DIR"
+LOG_FILE="${LOG_DIR}/launch_lmu.log"
+
+rotate_log() {
+    local log_file="$1"
+
+    rm -f -- "${log_file}.9"
+    for ((i = 8; i >= 1; i--)); do
+        if [[ -e "${log_file}.${i}" ]]; then
+            mv -- "${log_file}.${i}" "${log_file}.$((i + 1))"
+        fi
+    done
+    if [[ -e "$log_file" ]]; then
+        mv -- "$log_file" "${log_file}.1"
+    fi
+}
 
 # Start a fresh log and capture all launcher output while keeping it visible
+rotate_log "$LOG_FILE"
 : > "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -184,7 +201,7 @@ fi
 if [[ -n "${LMUSHM_BIN:-}" ]]; then
     if ! pgrep -f "$LMUSHM_BIN" >/dev/null; then
         debuglog "Starting lmushm..."
-        ( tail -f /dev/null | "$LMUSHM_BIN" ) >/dev/null 2>&1 &
+        ( tail -f /dev/null | "$LMUSHM_BIN" ) &
     else
         debuglog "lmushm is already running."
     fi
@@ -236,21 +253,20 @@ if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
             sleep 1
         done
         
-        sleep 5
+        sleep 45
         debuglog "Starting CrewChief..."
         
         export WINEDEBUG="-winegstreamer,-gstreamer"
         export WINEDLLOVERRIDES="winegstreamer=d"
         export LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
         
-        protontricks-launch --no-runtime --appid 2399420 "$CREWCHIEF_BIN" >> "${SCRIPT_PATH}/CrewChiefLauncher.log" 2>&1 &
+        protontricks-launch --no-runtime --appid 2399420 "$CREWCHIEF_BIN" &
         
         # Wait for CrewChief to start and renice it to 19
         while ! pgrep -f "CrewChiefV4.exe" >/dev/null; do
             sleep 1
         done
         
-        local cc_pid
         cc_pid=$(pgrep -f "CrewChiefV4.exe" | head -n1)
         if [[ -n "$cc_pid" ]]; then
             renice -n 19 -p "$cc_pid" >/dev/null 2>&1 || true
@@ -261,7 +277,7 @@ fi
 
 # 4. Cleanup loop (waits 45s initially so slow startups don't trigger early kills)
 (
-    sleep 45
+    sleep 60
     while pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
         sleep 5
     done
