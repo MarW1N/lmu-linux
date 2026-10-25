@@ -11,9 +11,9 @@ unset LD_PRELOAD
 # Get the path to the directory containing this script
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
-# Keep the active log and numbered archives together under logs/.
+# Keep the active logs and numbered archives together under logs/.
 LOG_DIR="${SCRIPT_PATH}/logs"
-[ ! -d "$LOG_DIR" ] && mkdir -p "$LOG_DIR"
+[[ ! -d "$LOG_DIR" ]] && mkdir -p "$LOG_DIR"
 LOG_FILE="${LOG_DIR}/launch_lmu.log"
 
 rotate_log() {
@@ -30,7 +30,7 @@ rotate_log() {
     fi
 }
 
-# Start a fresh log and capture all launcher output while keeping it visible
+# Start a fresh main log and capture all launcher output while keeping it visible
 rotate_log "$LOG_FILE"
 : > "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -60,6 +60,11 @@ else
     errlog "Environment file $ENV_PATH not found. Exiting!"
     exit 1
 fi
+
+# Disable Proton's xalia.exe gamepad UI helper by default, as it continuously
+# polls CrewChief's WinForms controls via broken Wine COM/UIA accessibility
+# bridges and causes UI/COM resource leaks.
+export PROTON_NO_XALIA="${PROTON_NO_XALIA:-1}"
 
 DEBUG="${DEBUG:-false}"
 if [[ "$DEBUG" != true && "$DEBUG" != false ]]; then
@@ -108,7 +113,7 @@ if [[ -n "${LMUFFB_BIN:-}" ]]; then
     require_executable LMUFFB_BIN "$LMUFFB_BIN" "LMUFFB executable"
 fi
 if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
-    require_executable CREWCHIEF_BIN "${CREWCHIEF_BIN:-}" "CrewChief executable"
+    require_executable CREWCHIEF_BIN "$CREWCHIEF_BIN" "CrewChief executable"
     require_command "protontricks-launch"
 fi
 
@@ -148,8 +153,8 @@ LMU_SETTINGS_ORG="${LMU_INSTALL_DIR}/UserData/player/Settings.JSON"
 
 if [[ -f "$LMU_SETTINGS_ORG" ]]; then
     LMU_SETTINGS_TMP="$(mktemp /tmp/lmu_settings.XXXXXX.json)"
-    
-    jq \
+
+    if jq \
       --arg qc1 "${QUICK_CHAT_1:-}" \
       --arg qc2 "${QUICK_CHAT_2:-}" \
       --arg qc3 "${QUICK_CHAT_3:-}" \
@@ -175,10 +180,39 @@ if [[ -f "$LMU_SETTINGS_ORG" ]]; then
         if $qc10 != "" then . + {"Quick Chat #10": $qc10} else . end |
         if $qc11 != "" then . + {"Quick Chat #11": $qc11} else . end |
         if $qc12 != "" then . + {"Quick Chat #12": $qc12} else . end
-      )' "$LMU_SETTINGS_ORG" > "$LMU_SETTINGS_TMP" && mv -f "$LMU_SETTINGS_TMP" "$LMU_SETTINGS_ORG"
-    debuglog "Updated Settings.JSON chat mappings successfully at: $LMU_SETTINGS_ORG"
+      )' "$LMU_SETTINGS_ORG" > "$LMU_SETTINGS_TMP"; then
+        mv -f "$LMU_SETTINGS_TMP" "$LMU_SETTINGS_ORG"
+        debuglog "Updated Settings.JSON chat mappings successfully at: $LMU_SETTINGS_ORG"
+    else
+        rm -f -- "$LMU_SETTINGS_TMP"
+        errlog "Failed to update Settings.JSON with jq."
+    fi
 else
     debuglog "Settings.JSON not found at $LMU_SETTINGS_ORG, skipping chat updates."
+fi
+
+# Ensure CrewChief profiles have use_naudio=false so Wine/Proton audio does not hang
+if [[ -n "${CREWCHIEF_BIN:-}" && -n "${STEAM_COMPAT_DATA_PATH:-}" ]]; then
+    CC_PROFILES_DIR="${STEAM_COMPAT_DATA_PATH}/pfx/drive_c/users/steamuser/Documents/CrewChiefV4/Profiles"
+    if [[ -d "$CC_PROFILES_DIR" ]]; then
+        for cc_profile in "$CC_PROFILES_DIR"/*.json; do
+            [[ -f "$cc_profile" ]] || continue
+            if jq -e '.userSettings | type == "object" and .use_naudio != false' "$cc_profile" >/dev/null 2>&1; then
+                cc_profile_tmp="$(mktemp /tmp/cc_profile.XXXXXX.json)"
+                if jq '.userSettings.use_naudio = false' "$cc_profile" > "$cc_profile_tmp"; then
+                    mv -f "$cc_profile_tmp" "$cc_profile"
+                    debuglog "Updated CrewChief profile use_naudio=false at: $cc_profile"
+                else
+                    rm -f -- "$cc_profile_tmp"
+                    errlog "Failed to update CrewChief profile with jq: $cc_profile"
+                fi
+            else
+                debuglog "CrewChief profile already has use_naudio=false at: $cc_profile"
+            fi
+        done
+    else
+        debuglog "CrewChief profiles directory not found at $CC_PROFILES_DIR, skipping use_naudio check."
+    fi
 fi
 
 # Ensure old instances aren't stuck in the background
@@ -197,100 +231,217 @@ if [[ -n "${CREWCHIEF_BIN:-}" ]] && pgrep -f "CrewChiefV4.exe" >/dev/null; then
     exit 1
 fi
 
-# Start lmushm if configured and not already running
+# Helper: sleep in 1-second ticks, aborting immediately if LMU closes early
+wait_while_lmu_running() {
+    local seconds="$1"
+    local i
+    for ((i = 0; i < seconds; i++)); do
+        if ! pgrep -f "Le Mans Ultimate.exe" >/dev/null; then
+            return 1
+        fi
+        sleep 1
+    done
+    return 0
+}
+
+# Graceful two-stage teardown (SIGTERM -> wait up to 3s -> SIGKILL)
+LMUSHM_FIFO="${XDG_RUNTIME_DIR:-/tmp}/lmushm_$$.fifo"
+
+cleanup_helpers() {
+    local targets=("CrewChiefV4.exe" "LMUFFB.exe" "lmubridge.exe")
+    if [[ -n "${LMUSHM_BIN:-}" ]]; then
+        targets+=("${LMUSHM_BIN##*/}")
+    fi
+
+    local running=()
+    local target
+    for target in "${targets[@]}"; do
+        if pgrep -f "$target" >/dev/null 2>&1; then
+            running+=("$target")
+        fi
+    done
+
+    if (( ${#running[@]} > 0 )); then
+        debuglog "Stopping helper processes (${running[*]})..."
+        for target in "${running[@]}"; do
+            pkill -TERM -f "$target" 2>/dev/null || true
+        done
+
+        # Give helpers up to 3 seconds to save configs and close shared memory cleanly
+        local i still_alive
+        for ((i = 0; i < 30; i++)); do
+            still_alive=false
+            for target in "${running[@]}"; do
+                if pgrep -f "$target" >/dev/null 2>&1; then
+                    still_alive=true
+                    break
+                fi
+            done
+            [[ "$still_alive" == false ]] && break
+            sleep 0.1
+        done
+
+        # Force-kill anything still hanging the Wine prefix
+        for target in "${running[@]}"; do
+            if pgrep -f "$target" >/dev/null 2>&1; then
+                debuglog "Force-killing lingering helper: $target"
+                pkill -KILL -f "$target" 2>/dev/null || true
+            fi
+        done
+    fi
+
+    rm -f -- "$LMUSHM_FIFO"
+}
+
+# Start lmushm using a read-write FIFO so stdin stays open without an orphaned 'tail' process
 if [[ -n "${LMUSHM_BIN:-}" ]]; then
     if ! pgrep -f "$LMUSHM_BIN" >/dev/null; then
+        LMUSHM_LOG="${LOG_DIR}/lmushm.log"
+        rotate_log "$LMUSHM_LOG"
         debuglog "Starting lmushm..."
-        ( tail -f /dev/null | "$LMUSHM_BIN" ) &
+        rm -f -- "$LMUSHM_FIFO"
+        mkfifo "$LMUSHM_FIFO"
+        "$LMUSHM_BIN" <>"$LMUSHM_FIFO" >"$LMUSHM_LOG" 2>&1 &
     else
         debuglog "lmushm is already running."
     fi
 fi
 
-# 1. Wait for Le Mans Ultimate.exe to appear, then launch lmubridge using Proton's direct wine64
-if [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
-    (
+# Single background orchestrator for staggered startup and in-game exit detection
+orchestrate_helpers() {
+    local main_script_pid="$1"
+
+    # 1. Wait for Le Mans Ultimate.exe to appear (abort if main script dies first)
     while ! pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
+        if ! kill -0 "$main_script_pid" 2>/dev/null; then
+            return 0
+        fi
         sleep 1
     done
-    
-    sleep 3
-    debuglog "Launching lmubridge.exe via direct Proton wine64..."
-    
-    STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH" \
-    WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx" \
-    "$ACTIVE_PROTON_DIR/files/bin/wine64" "$LMUBRIDGE_BIN" &
-    ) &
-fi
+    debuglog "Detected Le Mans Ultimate.exe running."
 
-# 2. Wait a bit longer, then launch LMUFFB directly from its directory subshell
-if [[ -n "${LMUFFB_BIN:-}" ]]; then
-    (
-    while ! pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
-        sleep 1
-    done
-    sleep 8
-    debuglog "Starting LMUFFB directly from its directory..."
-
-    LMUFFB_DIR="${LMUFFB_BIN%/*}"
-    LMUFFB_EXE="${LMUFFB_BIN##*/}"
-
-    if [[ -d "$LMUFFB_DIR" ]]; then
-        cd "$LMUFFB_DIR" || exit 1
+    # 2. T+10s: Launch lmubridge via Proton wine64
+    if [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
+        wait_while_lmu_running 10 || { cleanup_helpers; return 0; }
+        local lmubridge_log="${LOG_DIR}/lmubridge.log"
+        rotate_log "$lmubridge_log"
+        debuglog "Launching lmubridge.exe via direct Proton wine64..."
         STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH" \
         WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx" \
-        "$ACTIVE_PROTON_DIR/files/bin/wine64" "./$LMUFFB_EXE" &
-    else
-        errlog "LMUFFB directory not found: $LMUFFB_DIR"
+        "$ACTIVE_PROTON_DIR/files/bin/wine64" "$LMUBRIDGE_BIN" \
+            </dev/null >"$lmubridge_log" 2>&1 &
     fi
-    ) &
-fi
 
-# 3. Launch CrewChief when its executable is configured
-if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
-    (
-        while ! pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
-            sleep 1
-        done
-        
-        sleep 45
-        debuglog "Starting CrewChief..."
-        
-        export WINEDEBUG="-winegstreamer,-gstreamer"
-        export WINEDLLOVERRIDES="winegstreamer=d"
-        export LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
-        
-        protontricks-launch --no-runtime --appid 2399420 "$CREWCHIEF_BIN" &
-        
-        # Wait for CrewChief to start and renice it to 19
-        while ! pgrep -f "CrewChiefV4.exe" >/dev/null; do
-            sleep 1
-        done
-        
-        cc_pid=$(pgrep -f "CrewChiefV4.exe" | head -n1)
-        if [[ -n "$cc_pid" ]]; then
-            renice -n 19 -p "$cc_pid" >/dev/null 2>&1 || true
-            debuglog "Reniced CrewChiefV4.exe (PID $cc_pid) to 19"
+    # 3. T+15s (5s after lmubridge, or 15s if lmubridge is disabled): Launch LMUFFB
+    if [[ -n "${LMUFFB_BIN:-}" ]]; then
+        local ffb_delay=15
+        [[ -n "${LMUBRIDGE_BIN:-}" ]] && ffb_delay=5
+        wait_while_lmu_running "$ffb_delay" || { cleanup_helpers; return 0; }
+
+        LMUFFB_DIR="${LMUFFB_BIN%/*}"
+        LMUFFB_EXE="${LMUFFB_BIN##*/}"
+        if [[ -d "$LMUFFB_DIR" ]]; then
+            local lmuffb_log="${LOG_DIR}/lmuffb.log"
+            rotate_log "$lmuffb_log"
+            debuglog "Starting LMUFFB directly from $LMUFFB_DIR..."
+            (
+                cd "$LMUFFB_DIR" || exit 1
+                STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH" \
+                WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx" \
+                exec "$ACTIVE_PROTON_DIR/files/bin/wine64" "./$LMUFFB_EXE" \
+                    </dev/null >"$lmuffb_log" 2>&1
+            ) &
+        else
+            errlog "LMUFFB directory not found: $LMUFFB_DIR"
         fi
-    ) &
-fi
+    fi
 
-# 4. Cleanup loop (waits 45s initially so slow startups don't trigger early kills)
-(
-    sleep 60
+    # 4. T+45s: Launch CrewChief via protontricks-launch
+    if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
+        local cc_delay=45
+        if [[ -n "${LMUFFB_BIN:-}" ]]; then
+            cc_delay=30
+        elif [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
+            cc_delay=35
+        fi
+        wait_while_lmu_running "$cc_delay" || { cleanup_helpers; return 0; }
+
+        local crewchief_log="${LOG_DIR}/crewchief.log"
+        rotate_log "$crewchief_log"
+        debuglog "Starting CrewChief via protontricks-launch..."
+
+        (
+            # Strip Steam Runtime paths from PATH and XDG_DATA_DIRS so host tools
+            # and libraries are used cleanly, matching a standalone shell session
+            clean_path=""
+            IFS=':'
+            for entry in $PATH; do
+                if [[ "$entry" != *"/ubuntu12_"* && "$entry" != *"/steam-runtime"* ]]; then
+                    clean_path="${clean_path:+${clean_path}:}${entry}"
+                fi
+            done
+            export PATH="$clean_path"
+
+            if [[ -n "${XDG_DATA_DIRS:-}" ]]; then
+                clean_xdg=""
+                for entry in $XDG_DATA_DIRS; do
+                    if [[ "$entry" != *"/ubuntu12_"* && "$entry" != *"/steam-runtime"* ]]; then
+                        clean_xdg="${clean_xdg:+${clean_xdg}:}${entry}"
+                    fi
+                done
+                export XDG_DATA_DIRS="$clean_xdg"
+            fi
+            unset IFS
+
+            # Unset Steam/Proton/runtime variables injected by Steam or launch_lmu.env
+            while IFS= read -r var; do
+                unset "$var"
+            done < <(compgen -e STEAM_ || true; compgen -e Steam || true)
+
+            unset LD_PRELOAD LD_LIBRARY_PATH \
+                GSETTINGS_SCHEMA_DIR GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_PATH_1_0 \
+                WINE_GST_REGISTRY_DIR ENABLE_VULKAN_RENDERDOC_CAPTURE \
+                PROTON_PATH PROTON_LOG PROTON_USE_EAC_LINUX DXVK_ASYNC \
+                WINEPREFIX WINEARCH WINE WINESERVER WINELOADER WINEDLLPATH
+
+            export WINEDEBUG="-winegstreamer,-gstreamer"
+            export PROTON_NO_XALIA=1
+            export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-60}"
+            export PROTON_VERSION="${PROTON_VERSION:-${ACTIVE_PROTON_DIR##*/}}"
+            export LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+
+            exec protontricks-launch --no-runtime --appid 2399420 "$CREWCHIEF_BIN" \
+                </dev/null >>"$crewchief_log" 2>&1
+        ) &
+
+        # Wait for CrewChiefV4.exe to start before continuing
+        while ! pgrep -f "CrewChiefV4.exe" >/dev/null; do
+            debuglog "Waiting for CrewChiefV4.exe to start..."
+            wait_while_lmu_running 1 || { cleanup_helpers; return 0; }
+        done
+        debuglog "Detected CrewChiefV4.exe running."
+    fi
+
+    # 5. Monitor Le Mans Ultimate.exe and trigger cleanup as soon as it closes
+    #    (Required so helper .exe processes exit and let Proton's wineserver shut down)
     while pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
-        sleep 5
+        sleep 2
     done
 
-    debuglog "Le Mans Ultimate closed. Terminating helper processes..."
-    pkill -f "lmubridge.exe" || true
-    pkill -f "lmushm" || true
-    pkill -f "LMUFFB.exe" || true
-    if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
-        pkill -f "CrewChiefV4.exe" || true
-    fi
-) &
+    debuglog "Le Mans Ultimate.exe closed. Cleaning up helpers so wineserver can exit..."
+    cleanup_helpers
+}
 
-# 5. Keep the main game in the foreground
-export LD_PRELOAD="$STEAM_LD_PRELOAD"
-gamemoderun "$@"
+orchestrate_helpers "$$" &
+ORCHESTRATOR_PID=$!
+
+# Guarantee cleanup if Steam stops the game or the script exits early
+on_script_exit() {
+    unset LD_PRELOAD
+    kill "$ORCHESTRATOR_PID" 2>/dev/null || true
+    cleanup_helpers
+}
+trap on_script_exit EXIT INT TERM
+
+# Keep the main game in the foreground
+LD_PRELOAD="$STEAM_LD_PRELOAD" gamemoderun "$@"
