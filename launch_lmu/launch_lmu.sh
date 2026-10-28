@@ -37,9 +37,22 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "####### BEGIN LAUNCH_LMU.SH LOG #######"
 
-# Logging functions using Bash built-in timestamps
+# Logging and desktop notification functions using Bash built-in timestamps
+notify() {
+    local message="$1"
+    local urgency="${2:-normal}"
+    printf '[%(%T)T] INFO: %s\n' -1 "$message"
+    if command -v notify-send >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        notify-send -u "$urgency" -a "LMU" -t 4000 "Le Mans Ultimate" "$message" 2>/dev/null || true
+    fi
+}
+
 errlog() {
-    printf '[%(%T)T] ERROR: %s\n' -1 "$1" >&2
+    local message="$1"
+    printf '[%(%T)T] ERROR: %s\n' -1 "$message" >&2
+    if command -v notify-send >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        notify-send -u critical -a "LMU" "Le Mans Ultimate - Error" "$message" 2>/dev/null || true
+    fi
 }
 
 debuglog() {
@@ -72,6 +85,12 @@ if [[ "$DEBUG" != true && "$DEBUG" != false ]]; then
     exit 1
 fi
 
+CONFIGURE_SHARED_MEMORY_PLUGIN="${CONFIGURE_SHARED_MEMORY_PLUGIN:-true}"
+if [[ "$CONFIGURE_SHARED_MEMORY_PLUGIN" != true && "$CONFIGURE_SHARED_MEMORY_PLUGIN" != false ]]; then
+    errlog "CONFIGURE_SHARED_MEMORY_PLUGIN must be true or false, got: $CONFIGURE_SHARED_MEMORY_PLUGIN"
+    exit 1
+fi
+
 require_executable() {
     local variable_name="$1"
     local executable_path="$2"
@@ -80,8 +99,11 @@ require_executable() {
     if [[ -z "$executable_path" ]]; then
         errlog "Set $variable_name in $ENV_PATH."
         exit 1
+    elif [[ ! -e "$executable_path" ]]; then
+        errlog "$description not found at: $executable_path (check $variable_name in $ENV_PATH)"
+        exit 1
     elif [[ ! -f "$executable_path" || ! -x "$executable_path" ]]; then
-        errlog "$description is not an executable file: $executable_path"
+        errlog "$description is not an executable file: $executable_path (check $variable_name in $ENV_PATH)"
         exit 1
     fi
     debuglog "Found $description at: $executable_path"
@@ -149,6 +171,11 @@ if [[ -z "$LMU_INSTALL_DIR" ]]; then
     done
 fi
 
+if [[ -z "$LMU_INSTALL_DIR" || ! -d "$LMU_INSTALL_DIR" ]]; then
+    errlog "Could not locate Le Mans Ultimate installation directory."
+    exit 1
+fi
+
 LMU_SETTINGS_ORG="${LMU_INSTALL_DIR}/UserData/player/Settings.JSON"
 
 if [[ -f "$LMU_SETTINGS_ORG" ]]; then
@@ -191,27 +218,90 @@ else
     debuglog "Settings.JSON not found at $LMU_SETTINGS_ORG, skipping chat updates."
 fi
 
-# Ensure CrewChief profiles have use_naudio=false so Wine/Proton audio does not hang
+# Configure CustomPluginVariables.JSON for Linux/Wine shared memory compatibility
+if [[ "$CONFIGURE_SHARED_MEMORY_PLUGIN" == true ]]; then
+    WINE_SMM_PLUGIN="${LMU_INSTALL_DIR}/Plugins/rFactor2SharedMemoryMapPlugin64_Wine.dll"
+    if [[ ! -f "$WINE_SMM_PLUGIN" ]]; then
+        errlog "Required Wine shared memory plugin not found at: $WINE_SMM_PLUGIN"
+        exit 1
+    fi
+
+    LMU_PLUGIN_VARS="${LMU_INSTALL_DIR}/UserData/player/CustomPluginVariables.JSON"
+    mkdir -p "${LMU_PLUGIN_VARS%/*}"
+    LMU_PLUGIN_TMP="$(mktemp /tmp/lmu_plugins.XXXXXX.json)"
+    if [[ -f "$LMU_PLUGIN_VARS" ]]; then
+        PLUGIN_SOURCE="$LMU_PLUGIN_VARS"
+    else
+        PLUGIN_SOURCE="/dev/null"
+    fi
+
+    if jq -n --slurpfile existing "$PLUGIN_SOURCE" '
+      ($existing[0] // {}) + {
+        "ChatTransceiver.dll": {
+          " Enabled": 1
+        },
+        "LMU.3.8.SharedMemoryMapPlugin.dll": {
+          " Enabled": 0,
+          "DebugISIInternals": 0,
+          "DebugOutputLevel": 0,
+          "DebugOutputSource": 1,
+          "DedicatedServerMapGlobally": 0,
+          "EnableDirectMemoryAccess": 0,
+          "EnableHWControlInput": 1,
+          "EnableRulesControlInput": 0,
+          "EnableWeatherControlInput": 0,
+          "UnsubscribedBuffersMask": 160
+        },
+        "rFactor2SharedMemoryMapPlugin64_Wine.dll": {
+          " Enabled": 1,
+          "DebugISIInternals": 0,
+          "DebugOutputLevel": 0,
+          "DebugOutputSource": 1,
+          "DedicatedServerMapGlobally": 0,
+          "EnableDirectMemoryAccess": 0,
+          "EnableHWControlInput": 1,
+          "EnableRulesControlInput": 0,
+          "EnableWeatherControlInput": 0,
+          "UnsubscribedBuffersMask": 160
+        }
+      }
+    ' > "$LMU_PLUGIN_TMP"; then
+        mv -f "$LMU_PLUGIN_TMP" "$LMU_PLUGIN_VARS"
+        debuglog "Updated CustomPluginVariables.JSON successfully at: $LMU_PLUGIN_VARS"
+    else
+        rm -f -- "$LMU_PLUGIN_TMP"
+        errlog "Failed to update CustomPluginVariables.JSON with jq at: $LMU_PLUGIN_VARS"
+        exit 1
+    fi
+fi
+
+# Ensure CrewChief profiles have use_naudio=false so Wine/Proton audio does not hang,
+# and align legacy shared memory settings when CONFIGURE_SHARED_MEMORY_PLUGIN is enabled
 if [[ -n "${CREWCHIEF_BIN:-}" && -n "${STEAM_COMPAT_DATA_PATH:-}" ]]; then
     CC_PROFILES_DIR="${STEAM_COMPAT_DATA_PATH}/pfx/drive_c/users/steamuser/Documents/CrewChiefV4/Profiles"
     if [[ -d "$CC_PROFILES_DIR" ]]; then
         for cc_profile in "$CC_PROFILES_DIR"/*.json; do
             [[ -f "$cc_profile" ]] || continue
-            if jq -e '.userSettings | type == "object" and .use_naudio != false' "$cc_profile" >/dev/null 2>&1; then
-                cc_profile_tmp="$(mktemp /tmp/cc_profile.XXXXXX.json)"
-                if jq '.userSettings.use_naudio = false' "$cc_profile" > "$cc_profile_tmp"; then
-                    mv -f "$cc_profile_tmp" "$cc_profile"
-                    debuglog "Updated CrewChief profile use_naudio=false at: $cc_profile"
-                else
-                    rm -f -- "$cc_profile_tmp"
-                    errlog "Failed to update CrewChief profile with jq: $cc_profile"
-                fi
+            cc_profile_tmp="$(mktemp /tmp/cc_profile.XXXXXX.json)"
+            if jq --argjson cfg_shm "$CONFIGURE_SHARED_MEMORY_PLUGIN" '
+              if (.userSettings | type) == "object" then
+                .userSettings.use_naudio = false |
+                if $cfg_shm then
+                  .userSettings.use_legacy_rf2_shared_memory_filenames = true |
+                  .userSettings.enable_lmu_rf2_plugin_dll_check = false |
+                  .userSettings.enable_automatic_plugin_update = false
+                else . end
+              else . end
+            ' "$cc_profile" > "$cc_profile_tmp"; then
+                mv -f "$cc_profile_tmp" "$cc_profile"
+                debuglog "Verified/updated CrewChief profile settings at: $cc_profile"
             else
-                debuglog "CrewChief profile already has use_naudio=false at: $cc_profile"
+                rm -f -- "$cc_profile_tmp"
+                errlog "Failed to update CrewChief profile with jq: $cc_profile"
             fi
         done
     else
-        debuglog "CrewChief profiles directory not found at $CC_PROFILES_DIR, skipping use_naudio check."
+        debuglog "CrewChief profiles directory not found at $CC_PROFILES_DIR, skipping profile update."
     fi
 fi
 
@@ -246,8 +336,11 @@ wait_while_lmu_running() {
 
 # Graceful two-stage teardown (SIGTERM -> wait up to 3s -> SIGKILL)
 LMUSHM_FIFO="${XDG_RUNTIME_DIR:-/tmp}/lmushm_$$.fifo"
+CLEANUP_LOCK="${XDG_RUNTIME_DIR:-/tmp}/lmu_cleanup_$$.lock"
 
 cleanup_helpers() {
+    mkdir "$CLEANUP_LOCK" 2>/dev/null || return 0
+
     local targets=("CrewChiefV4.exe" "LMUFFB.exe" "lmubridge.exe")
     if [[ -n "${LMUSHM_BIN:-}" ]]; then
         targets+=("${LMUSHM_BIN##*/}")
@@ -262,7 +355,7 @@ cleanup_helpers() {
     done
 
     if (( ${#running[@]} > 0 )); then
-        debuglog "Stopping helper processes (${running[*]})..."
+        notify "Stopping helper processes: ${running[*]}"
         for target in "${running[@]}"; do
             pkill -TERM -f "$target" 2>/dev/null || true
         done
@@ -282,12 +375,23 @@ cleanup_helpers() {
         done
 
         # Force-kill anything still hanging the Wine prefix
+        local failed_stop=()
         for target in "${running[@]}"; do
             if pgrep -f "$target" >/dev/null 2>&1; then
                 debuglog "Force-killing lingering helper: $target"
                 pkill -KILL -f "$target" 2>/dev/null || true
+                sleep 0.1
+                if pgrep -f "$target" >/dev/null 2>&1; then
+                    failed_stop+=("$target")
+                fi
             fi
         done
+
+        if (( ${#failed_stop[@]} > 0 )); then
+            errlog "Failed to stop helper processes: ${failed_stop[*]}"
+        else
+            notify "Stopped helper processes: ${running[*]}"
+        fi
     fi
 
     rm -f -- "$LMUSHM_FIFO"
@@ -298,10 +402,17 @@ if [[ -n "${LMUSHM_BIN:-}" ]]; then
     if ! pgrep -f "$LMUSHM_BIN" >/dev/null; then
         LMUSHM_LOG="${LOG_DIR}/lmushm.log"
         rotate_log "$LMUSHM_LOG"
-        debuglog "Starting lmushm..."
+        notify "Starting lmushm..."
         rm -f -- "$LMUSHM_FIFO"
         mkfifo "$LMUSHM_FIFO"
         "$LMUSHM_BIN" <>"$LMUSHM_FIFO" >"$LMUSHM_LOG" 2>&1 &
+        sleep 0.2
+        if pgrep -f "$LMUSHM_BIN" >/dev/null; then
+            notify "lmushm started."
+        else
+            errlog "lmushm failed to start ($LMUSHM_BIN). Check $LMUSHM_LOG."
+            exit 1
+        fi
     else
         debuglog "lmushm is already running."
     fi
@@ -318,24 +429,31 @@ orchestrate_helpers() {
         fi
         sleep 1
     done
-    debuglog "Detected Le Mans Ultimate.exe running."
+    notify "Le Mans Ultimate started."
 
     # 2. T+10s: Launch lmubridge via Proton wine64
     if [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
         wait_while_lmu_running 10 || { cleanup_helpers; return 0; }
         local lmubridge_log="${LOG_DIR}/lmubridge.log"
         rotate_log "$lmubridge_log"
-        debuglog "Launching lmubridge.exe via direct Proton wine64..."
+        notify "Starting LMU Shared Memory Bridge (lmubridge.exe)..."
         STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH" \
         WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx" \
         "$ACTIVE_PROTON_DIR/files/bin/wine64" "$LMUBRIDGE_BIN" \
             </dev/null >"$lmubridge_log" 2>&1 &
+
+        wait_while_lmu_running 1 || { cleanup_helpers; return 0; }
+        if pgrep -f "lmubridge.exe" >/dev/null; then
+            notify "LMU Shared Memory Bridge started."
+        else
+            errlog "LMU Shared Memory Bridge (lmubridge.exe) failed to start. Check $lmubridge_log."
+        fi
     fi
 
     # 3. T+15s (5s after lmubridge, or 15s if lmubridge is disabled): Launch LMUFFB
     if [[ -n "${LMUFFB_BIN:-}" ]]; then
         local ffb_delay=15
-        [[ -n "${LMUBRIDGE_BIN:-}" ]] && ffb_delay=5
+        [[ -n "${LMUBRIDGE_BIN:-}" ]] && ffb_delay=4
         wait_while_lmu_running "$ffb_delay" || { cleanup_helpers; return 0; }
 
         LMUFFB_DIR="${LMUFFB_BIN%/*}"
@@ -343,7 +461,7 @@ orchestrate_helpers() {
         if [[ -d "$LMUFFB_DIR" ]]; then
             local lmuffb_log="${LOG_DIR}/lmuffb.log"
             rotate_log "$lmuffb_log"
-            debuglog "Starting LMUFFB directly from $LMUFFB_DIR..."
+            notify "Starting LMUFFB..."
             (
                 cd "$LMUFFB_DIR" || exit 1
                 STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH" \
@@ -351,6 +469,13 @@ orchestrate_helpers() {
                 exec "$ACTIVE_PROTON_DIR/files/bin/wine64" "./$LMUFFB_EXE" \
                     </dev/null >"$lmuffb_log" 2>&1
             ) &
+
+            wait_while_lmu_running 1 || { cleanup_helpers; return 0; }
+            if pgrep -f "LMUFFB.exe" >/dev/null; then
+                notify "LMUFFB started."
+            else
+                errlog "LMUFFB failed to start. Check $lmuffb_log."
+            fi
         else
             errlog "LMUFFB directory not found: $LMUFFB_DIR"
         fi
@@ -358,17 +483,17 @@ orchestrate_helpers() {
 
     # 4. T+45s: Launch CrewChief via protontricks-launch
     if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
-        local cc_delay=45
+        local cc_delay=25
         if [[ -n "${LMUFFB_BIN:-}" ]]; then
-            cc_delay=30
+            cc_delay=29
         elif [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
-            cc_delay=35
+            cc_delay=34
         fi
         wait_while_lmu_running "$cc_delay" || { cleanup_helpers; return 0; }
 
         local crewchief_log="${LOG_DIR}/crewchief.log"
         rotate_log "$crewchief_log"
-        debuglog "Starting CrewChief via protontricks-launch..."
+        notify "Starting CrewChief..."
 
         (
             # Strip Steam Runtime paths from PATH and XDG_DATA_DIRS so host tools
@@ -413,13 +538,22 @@ orchestrate_helpers() {
             exec protontricks-launch --no-runtime --appid 2399420 "$CREWCHIEF_BIN" \
                 </dev/null >>"$crewchief_log" 2>&1
         ) &
+        local cc_launcher_pid=$!
 
         # Wait for CrewChiefV4.exe to start before continuing
+        local cc_started=true
         while ! pgrep -f "CrewChiefV4.exe" >/dev/null; do
+            if ! kill -0 "$cc_launcher_pid" 2>/dev/null; then
+                errlog "CrewChief failed to start. Check $crewchief_log."
+                cc_started=false
+                break
+            fi
             debuglog "Waiting for CrewChiefV4.exe to start..."
             wait_while_lmu_running 1 || { cleanup_helpers; return 0; }
         done
-        debuglog "Detected CrewChiefV4.exe running."
+        if [[ "$cc_started" == true ]]; then
+            notify "CrewChief started."
+        fi
     fi
 
     # 5. Monitor Le Mans Ultimate.exe and trigger cleanup as soon as it closes
@@ -428,7 +562,7 @@ orchestrate_helpers() {
         sleep 2
     done
 
-    debuglog "Le Mans Ultimate.exe closed. Cleaning up helpers so wineserver can exit..."
+    notify "Le Mans Ultimate stopped."
     cleanup_helpers
 }
 
@@ -438,10 +572,16 @@ ORCHESTRATOR_PID=$!
 # Guarantee cleanup if Steam stops the game or the script exits early
 on_script_exit() {
     unset LD_PRELOAD
-    kill "$ORCHESTRATOR_PID" 2>/dev/null || true
-    cleanup_helpers
+    if [[ -d "$CLEANUP_LOCK" ]]; then
+        wait "$ORCHESTRATOR_PID" 2>/dev/null || true
+    else
+        kill "$ORCHESTRATOR_PID" 2>/dev/null || true
+        cleanup_helpers
+    fi
+    rm -rf -- "$CLEANUP_LOCK"
 }
 trap on_script_exit EXIT INT TERM
 
 # Keep the main game in the foreground
+notify "Starting Le Mans Ultimate..."
 LD_PRELOAD="$STEAM_LD_PRELOAD" gamemoderun "$@"

@@ -7,14 +7,22 @@ I have other plans for other software I use as well, such as CrewChief (https://
 
 ## Configuration
 
-### simshm and lmubridge.exe
-Uncomment SIMSHMBRIDGE_DIR and make sure the path points to a directory containing *simshm* and *lmubridge.exe* binaries.
+### lmushm and lmubridge.exe
+Uncomment `LMUSHM_BIN` and `LMUBRIDGE_BIN` in `launch_lmu.env` and make sure they point to your `lmushm` and `lmubridge.exe` binaries.
 
 ### LMUFFB
-Uncomment LMUFFB_DIR and make sure it points to a path containing *LMUFFB.exe* binary.
+Uncomment `LMUFFB_BIN` in `launch_lmu.env` and make sure it points to the `LMUFFB.exe` binary.
 
-### Logging
-Launcher, game, and helper-process output is written to `logs/launch_lmu.log`. The active log and up to nine uncompressed, numbered archives (for example, `launch_lmu.log.1`) are kept in the `logs` folder.
+### CrewChief
+Uncomment `CREWCHIEF_BIN` in `launch_lmu.env` and make sure it points to `CrewChiefV4.exe`. When enabled, `launch_lmu.sh` automatically ensures `.userSettings.use_naudio = false` in CrewChief's profiles so audio does not hang under Wine/Proton.
+
+### Shared Memory Plugin (`CustomPluginVariables.JSON`)
+`CONFIGURE_SHARED_MEMORY_PLUGIN=true` (enabled by default in `launch_lmu.env`) automatically configures `UserData/player/CustomPluginVariables.JSON` so that `rFactor2SharedMemoryMapPlugin64_Wine.dll` and `ChatTransceiver.dll` are enabled and `LMU.3.8.SharedMemoryMapPlugin.dll` (which fails under Wine) is disabled. Set `CONFIGURE_SHARED_MEMORY_PLUGIN=false` to manage `CustomPluginVariables.JSON` manually.
+
+### Logging and Desktop Notifications
+Launcher, game, and helper-process output is written to `logs/launch_lmu.log` (with per-helper logs in `logs/lmushm.log`, `logs/lmubridge.log`, `logs/lmuffb.log`, and `logs/crewchief.log`). The active logs and up to nine uncompressed, numbered archives (for example, `launch_lmu.log.1`) are kept in the `logs` folder.
+
+Desktop notifications (`notify-send`) are displayed when the game and helper tools start and stop, and critical notifications (`notify-send -u critical`) are shown alongside `ERROR:` log entries whenever a configuration or runtime error prevents normal operation.
 
 Debug logging can be activated by uncommenting `DEBUG=true` in `launch_lmu.env`.
 
