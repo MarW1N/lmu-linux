@@ -1,9 +1,7 @@
 # Description
 I made this launch_lmu.sh to make it easier for myself to launch LMU so that I can use TinyPedal (https://github.com/TinyPedal/TinyPedal) using the native LMU API with the help of *lmushm* and *lmubridge.exe* from https://github.com/Spacefreak18/simshmbridge and thought someone else might find it useful.
 
-Then I found the excellent LMUFFB (https://github.com/coasting-nc/LMUFFB) to make use of LMU telemetry to enhance the force feedback and incorporated that as well.
-
-I have other plans for other software I use as well, such as CrewChief (https://gitlab.com/mr_belowski/CrewChiefV4) which I currently launch manually.
+Then I found the excellent LMUFFB (https://github.com/coasting-nc/LMUFFB) to make use of LMU telemetry to enhance the force feedback and incorporated that as well, along with automatic startup and shutdown orchestration for CrewChief (https://gitlab.com/mr_belowski/CrewChiefV4).
 
 ## Configuration
 
@@ -15,6 +13,9 @@ Uncomment `LMUFFB_BIN` in `launch_lmu.env` and make sure it points to the `LMUFF
 
 ### CrewChief
 Uncomment `CREWCHIEF_BIN` in `launch_lmu.env` and make sure it points to `CrewChiefV4.exe`. When enabled, `launch_lmu.sh` automatically ensures `.userSettings.use_naudio = false` in CrewChief's profiles so audio does not hang under Wine/Proton.
+
+### Startup Delays and GameMode
+Helper tools start at configurable offsets (in seconds) after `Le Mans Ultimate.exe` launches: `LMUBRIDGE_DELAY=10`, `LMUFFB_DELAY=15`, and `CREWCHIEF_DELAY=35` (with `CREWCHIEF_STARTUP_TIMEOUT=30`). GameMode (`gamemoderun`) is used automatically when installed and can be toggled with `USE_GAMEMODE=true|false`.
 
 ### Shared Memory Plugin (`CustomPluginVariables.JSON`)
 `CONFIGURE_SHARED_MEMORY_PLUGIN=true` (enabled by default in `launch_lmu.env`) automatically configures `UserData/player/CustomPluginVariables.JSON` so that `rFactor2SharedMemoryMapPlugin64_Wine.dll` and `ChatTransceiver.dll` are enabled and `LMU.3.8.SharedMemoryMapPlugin.dll` (which fails under Wine) is disabled. Set `CONFIGURE_SHARED_MEMORY_PLUGIN=false` to manage `CustomPluginVariables.JSON` manually.
