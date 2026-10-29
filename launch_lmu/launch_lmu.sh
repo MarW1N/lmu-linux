@@ -76,8 +76,17 @@ fi
 
 # Disable Proton's xalia.exe gamepad UI helper by default, as it continuously
 # polls CrewChief's WinForms controls via broken Wine COM/UIA accessibility
-# bridges and causes UI/COM resource leaks.
+# bridges and causes severe wineserver/UIA syscall storms.
+# Proton 9/10+ checks PROTON_USE_XALIA=0; WINEDLLOVERRIDES blocks explorer.exe
+# from spawning xalia.exe in direct wine64 / protontricks helper sessions.
+export PROTON_USE_XALIA="${PROTON_USE_XALIA:-0}"
 export PROTON_NO_XALIA="${PROTON_NO_XALIA:-1}"
+if [[ "${PROTON_USE_XALIA}" == "0" ]]; then
+    case ";${WINEDLLOVERRIDES:-};" in
+        *";xalia.exe="* | *";xalia="*) ;;
+        *) export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+${WINEDLLOVERRIDES};}xalia.exe=d" ;;
+    esac
+fi
 
 DEBUG="${DEBUG:-false}"
 if [[ "$DEBUG" != true && "$DEBUG" != false ]]; then
@@ -321,17 +330,82 @@ if [[ -n "${CREWCHIEF_BIN:-}" ]] && pgrep -f "CrewChiefV4.exe" >/dev/null; then
     exit 1
 fi
 
+# Cache Le Mans Ultimate.exe PID once found so monitoring uses zero-fork kill -0 checks
+LMU_EXE_PID=""
+
+lmu_is_running() {
+    if [[ -n "$LMU_EXE_PID" ]] && kill -0 "$LMU_EXE_PID" 2>/dev/null; then
+        if [[ -r "/proc/${LMU_EXE_PID}/comm" ]]; then
+            local comm=""
+            IFS= read -r comm < "/proc/${LMU_EXE_PID}/comm" || true
+            if [[ "$comm" == "Le Mans Ultimat"* ]]; then
+                return 0
+            fi
+        fi
+    fi
+    LMU_EXE_PID="$(pgrep -f "Le Mans Ultimate.exe" | head -n 1 || true)"
+    [[ -n "$LMU_EXE_PID" ]]
+}
+
 # Helper: sleep in 1-second ticks, aborting immediately if LMU closes early
 wait_while_lmu_running() {
     local seconds="$1"
     local i
     for ((i = 0; i < seconds; i++)); do
-        if ! pgrep -f "Le Mans Ultimate.exe" >/dev/null; then
+        if ! lmu_is_running; then
             return 1
         fi
         sleep 1
     done
     return 0
+}
+
+# Copy WINEFSYNC / WINEESYNC / WINENTSYNC from the active Proton wineserver so
+# helper processes use the exact same kernel sync primitives instead of falling
+# back to heavy single-threaded wineserver socket RPCs.
+HELPER_WINE_SYNC_ARGS=()
+
+load_wineserver_sync_env() {
+    local target_prefix="${STEAM_COMPAT_DATA_PATH}/pfx"
+    local target_real="$target_prefix"
+    if command -v realpath >/dev/null 2>&1; then
+        target_real="$(realpath "$target_prefix" 2>/dev/null || printf '%s' "$target_prefix")"
+    fi
+
+    local ws_pid entry key val val_real
+    HELPER_WINE_SYNC_ARGS=()
+
+    while IFS= read -r ws_pid; do
+        [[ -n "$ws_pid" && -r "/proc/${ws_pid}/environ" ]] || continue
+        local match_prefix=false
+        local sync_vars=()
+        while IFS= read -r -d '' entry; do
+            key="${entry%%=*}"
+            val="${entry#*=}"
+            case "$key" in
+                WINEPREFIX)
+                    val_real="$val"
+                    if command -v realpath >/dev/null 2>&1; then
+                        val_real="$(realpath "$val" 2>/dev/null || printf '%s' "$val")"
+                    fi
+                    if [[ "$val" == "$target_prefix" || "$val_real" == "$target_real" || "$val" == *"/compatdata/2399420/"* ]]; then
+                        match_prefix=true
+                    fi
+                    ;;
+                WINEFSYNC|WINEESYNC|WINENTSYNC|PROTON_USE_NTSYNC|PROTON_NO_FSYNC|PROTON_NO_ESYNC)
+                    sync_vars+=("${key}=${val}")
+                    ;;
+            esac
+        done < "/proc/${ws_pid}/environ"
+
+        if [[ "$match_prefix" == true ]]; then
+            HELPER_WINE_SYNC_ARGS=("${sync_vars[@]}")
+            debuglog "Copied sync env from wineserver (PID ${ws_pid}): ${HELPER_WINE_SYNC_ARGS[*]}"
+            return 0
+        fi
+    done < <(pgrep -x "wineserver" || true)
+
+    debuglog "Could not match running wineserver for $target_prefix; helpers will use default sync env."
 }
 
 # Graceful two-stage teardown (SIGTERM -> wait up to 3s -> SIGKILL)
@@ -421,26 +495,37 @@ fi
 # Single background orchestrator for staggered startup and in-game exit detection
 orchestrate_helpers() {
     local main_script_pid="$1"
+    local helper_winedebug="-all"
+    [[ "$DEBUG" == true ]] && helper_winedebug="-winegstreamer,-gstreamer"
 
     # 1. Wait for Le Mans Ultimate.exe to appear (abort if main script dies first)
-    while ! pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
+    while ! lmu_is_running; do
         if ! kill -0 "$main_script_pid" 2>/dev/null; then
             return 0
         fi
         sleep 1
     done
     notify "Le Mans Ultimate started."
+    load_wineserver_sync_env
 
     # 2. T+10s: Launch lmubridge via Proton wine64
     if [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
         wait_while_lmu_running 10 || { cleanup_helpers; return 0; }
+        [[ ${#HELPER_WINE_SYNC_ARGS[@]} -eq 0 ]] && load_wineserver_sync_env
         local lmubridge_log="${LOG_DIR}/lmubridge.log"
         rotate_log "$lmubridge_log"
         notify "Starting LMU Shared Memory Bridge (lmubridge.exe)..."
-        STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH" \
-        WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx" \
-        "$ACTIVE_PROTON_DIR/files/bin/wine64" "$LMUBRIDGE_BIN" \
-            </dev/null >"$lmubridge_log" 2>&1 &
+        (
+            [[ ${#HELPER_WINE_SYNC_ARGS[@]} -gt 0 ]] && export "${HELPER_WINE_SYNC_ARGS[@]}"
+            export STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH"
+            export WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx"
+            export PROTON_USE_XALIA=0
+            export PROTON_NO_XALIA=1
+            export WINEDEBUG="$helper_winedebug"
+            export WINEDLLOVERRIDES="xalia.exe=d"
+            exec "$ACTIVE_PROTON_DIR/files/bin/wine64" "$LMUBRIDGE_BIN" \
+                </dev/null >"$lmubridge_log" 2>&1
+        ) &
 
         wait_while_lmu_running 1 || { cleanup_helpers; return 0; }
         if pgrep -f "lmubridge.exe" >/dev/null; then
@@ -455,6 +540,7 @@ orchestrate_helpers() {
         local ffb_delay=15
         [[ -n "${LMUBRIDGE_BIN:-}" ]] && ffb_delay=4
         wait_while_lmu_running "$ffb_delay" || { cleanup_helpers; return 0; }
+        [[ ${#HELPER_WINE_SYNC_ARGS[@]} -eq 0 ]] && load_wineserver_sync_env
 
         LMUFFB_DIR="${LMUFFB_BIN%/*}"
         LMUFFB_EXE="${LMUFFB_BIN##*/}"
@@ -464,8 +550,13 @@ orchestrate_helpers() {
             notify "Starting LMUFFB..."
             (
                 cd "$LMUFFB_DIR" || exit 1
-                STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH" \
-                WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx" \
+                [[ ${#HELPER_WINE_SYNC_ARGS[@]} -gt 0 ]] && export "${HELPER_WINE_SYNC_ARGS[@]}"
+                export STEAM_COMPAT_DATA_PATH="$STEAM_COMPAT_DATA_PATH"
+                export WINEPREFIX="${STEAM_COMPAT_DATA_PATH}/pfx"
+                export PROTON_USE_XALIA=0
+                export PROTON_NO_XALIA=1
+                export WINEDEBUG="$helper_winedebug"
+                export WINEDLLOVERRIDES="xalia.exe=d"
                 exec "$ACTIVE_PROTON_DIR/files/bin/wine64" "./$LMUFFB_EXE" \
                     </dev/null >"$lmuffb_log" 2>&1
             ) &
@@ -481,15 +572,16 @@ orchestrate_helpers() {
         fi
     fi
 
-    # 4. T+45s: Launch CrewChief via protontricks-launch
+    # 4. T+35s: Launch CrewChief via protontricks-launch
     if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
-        local cc_delay=25
+        local cc_delay=15
         if [[ -n "${LMUFFB_BIN:-}" ]]; then
-            cc_delay=29
+            cc_delay=19
         elif [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
-            cc_delay=34
+            cc_delay=24
         fi
         wait_while_lmu_running "$cc_delay" || { cleanup_helpers; return 0; }
+        [[ ${#HELPER_WINE_SYNC_ARGS[@]} -eq 0 ]] && load_wineserver_sync_env
 
         local crewchief_log="${LOG_DIR}/crewchief.log"
         rotate_log "$crewchief_log"
@@ -529,8 +621,14 @@ orchestrate_helpers() {
                 PROTON_PATH PROTON_LOG PROTON_USE_EAC_LINUX DXVK_ASYNC \
                 WINEPREFIX WINEARCH WINE WINESERVER WINELOADER WINEDLLPATH
 
-            export WINEDEBUG="-winegstreamer,-gstreamer"
+            # Match wineserver sync primitives (including WINENTSYNC) and prevent
+            # protontricks from injecting DXVK/NVAPI or spawning xalia.exe
+            [[ ${#HELPER_WINE_SYNC_ARGS[@]} -gt 0 ]] && export "${HELPER_WINE_SYNC_ARGS[@]}"
+            export WINEDEBUG="$helper_winedebug"
+            export PROTON_USE_XALIA=0
             export PROTON_NO_XALIA=1
+            export DXVK_ENABLE_NVAPI=0
+            export WINEDLLOVERRIDES="dxgi,d3d9,d3d10core,d3d11,d3d12,d3d12core=b;nvapi,nvapi64,nvofapi64=d;winegstreamer=d;xalia.exe=d"
             export PULSE_LATENCY_MSEC="${PULSE_LATENCY_MSEC:-60}"
             export PROTON_VERSION="${PROTON_VERSION:-${ACTIVE_PROTON_DIR##*/}}"
             export LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
@@ -558,7 +656,7 @@ orchestrate_helpers() {
 
     # 5. Monitor Le Mans Ultimate.exe and trigger cleanup as soon as it closes
     #    (Required so helper .exe processes exit and let Proton's wineserver shut down)
-    while pgrep -f "Le Mans Ultimate.exe" >/dev/null; do
+    while lmu_is_running; do
         sleep 2
     done
 
