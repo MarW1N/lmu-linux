@@ -11,9 +11,18 @@ unset LD_PRELOAD
 # Get the path to the directory containing this script
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 
+# "--check" validates configuration and paths, then exits without launching anything,
+# touching any game/helper config, or rotating logs. Steam never passes this as its
+# first argument (%command% starts with a path), so it cannot collide with a real launch.
+CHECK_MODE=false
+if [[ "${1:-}" == "--check" ]]; then
+    CHECK_MODE=true
+    shift
+fi
+
 # Keep the active logs and numbered archives together under logs/.
 LOG_DIR="${SCRIPT_PATH}/logs"
-[[ ! -d "$LOG_DIR" ]] && mkdir -p "$LOG_DIR"
+[[ "$CHECK_MODE" == true ]] || mkdir -p "$LOG_DIR"
 LOG_FILE="${LOG_DIR}/launch_lmu.log"
 
 rotate_log() {
@@ -31,32 +40,37 @@ rotate_log() {
 }
 
 # Start a fresh main log and capture all launcher output while keeping it visible
-rotate_log "$LOG_FILE"
-: > "$LOG_FILE"
-exec > >(tee -a "$LOG_FILE") 2>&1
-
-echo "####### BEGIN LAUNCH_LMU.SH LOG #######"
+if [[ "$CHECK_MODE" == false ]]; then
+    rotate_log "$LOG_FILE"
+    : > "$LOG_FILE"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+    echo "####### BEGIN LAUNCH_LMU.SH LOG #######"
+else
+    echo "####### LAUNCH_LMU.SH --check (nothing will be launched or modified) #######"
+fi
 
 # Logging and desktop notification functions using Bash built-in timestamps
 notify() {
     local message="$1"
     local urgency="${2:-normal}"
     printf '[%(%T)T] INFO: %s\n' -1 "$message"
-    if command -v notify-send >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-        notify-send -u "$urgency" -a "LMU" -t 4000 "Le Mans Ultimate" "$message" 2>/dev/null || true
+    [[ "$CHECK_MODE" == false ]] || return 0
+    if command -v notify-send > /dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        notify-send -u "$urgency" -a "LMU" -t 4000 "Le Mans Ultimate" "$message" 2> /dev/null || true
     fi
 }
 
 errlog() {
     local message="$1"
     printf '[%(%T)T] ERROR: %s\n' -1 "$message" >&2
-    if command -v notify-send >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-        notify-send -u critical -a "LMU" "Le Mans Ultimate - Error" "$message" 2>/dev/null || true
+    [[ "$CHECK_MODE" == false ]] || return 0
+    if command -v notify-send > /dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        notify-send -u critical -a "LMU" "Le Mans Ultimate - Error" "$message" 2> /dev/null || true
     fi
 }
 
 debuglog() {
-    if [[ "${DEBUG:-false}" == true ]]; then
+    if [[ "${DEBUG:-false}" == true || "$CHECK_MODE" == true ]]; then
         printf '[%(%T)T] DEBUG: %s\n' -1 "$1" >&2
     fi
 }
@@ -150,7 +164,7 @@ require_executable() {
 require_command() {
     local command_name="$1"
 
-    if ! command -v "$command_name" >/dev/null 2>&1; then
+    if ! command -v "$command_name" > /dev/null 2>&1; then
         errlog "Required command not found: $command_name"
         exit 1
     fi
@@ -162,7 +176,7 @@ commands=("jq" "pgrep" "pkill")
 for cmd in "${commands[@]}"; do
     require_command "$cmd"
 done
-if ! command -v notify-send >/dev/null 2>&1; then
+if ! command -v notify-send > /dev/null 2>&1; then
     debuglog "Optional command notify-send not found; desktop notifications disabled."
 fi
 
@@ -178,6 +192,44 @@ fi
 if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
     require_executable CREWCHIEF_BIN "$CREWCHIEF_BIN" "CrewChief executable"
     require_command "protontricks-launch"
+fi
+
+if [[ "$CHECK_MODE" == true ]]; then
+    check_failed=false
+    notify "Configuration and helper paths OK (DEBUG=$DEBUG, GameMode=$USE_GAMEMODE)."
+    if [[ "$USE_GAMEMODE" == true ]] && ! command -v gamemoderun > /dev/null 2>&1; then
+        notify "gamemoderun not found; the game would launch without GameMode."
+    fi
+    if [[ -z "${STEAM_COMPAT_TOOL_PATHS:-}" ]]; then
+        notify "Not running under Steam (STEAM_COMPAT_TOOL_PATHS unset); skipping Proton and install checks."
+    else
+        check_proton_dir="${STEAM_COMPAT_TOOL_PATHS%%:*}"
+        for check_file in "$check_proton_dir/proton" "$check_proton_dir/files/bin/wine64"; do
+            if [[ -x "$check_file" ]]; then
+                notify "Found: $check_file"
+            else
+                errlog "Missing or not executable: $check_file"
+                check_failed=true
+            fi
+        done
+        check_install="${STEAM_COMPAT_INSTALL_PATH:-}"
+        if [[ -n "$check_install" && -d "$check_install" ]]; then
+            notify "LMU install directory: $check_install"
+            if [[ "$CONFIGURE_SHARED_MEMORY_PLUGIN" == true && ! -f "$check_install/Plugins/rFactor2SharedMemoryMapPlugin64_Wine.dll" ]]; then
+                errlog "Wine shared memory plugin missing in $check_install/Plugins"
+                check_failed=true
+            fi
+        else
+            errlog "Could not determine LMU install directory from STEAM_COMPAT_INSTALL_PATH."
+            check_failed=true
+        fi
+    fi
+    if [[ "$check_failed" == true ]]; then
+        errlog "Check finished with problems."
+        exit 1
+    fi
+    notify "Check passed."
+    exit 0
 fi
 
 if [[ -z "${STEAM_COMPAT_TOOL_PATHS:-}" ]]; then
@@ -231,7 +283,7 @@ commit_temp_json() {
     fi
 
     if [[ -f "$target_file" ]]; then
-        chmod --reference="$target_file" "$tmp_file" 2>/dev/null || chmod 0644 "$tmp_file"
+        chmod --reference="$target_file" "$tmp_file" 2> /dev/null || chmod 0644 "$tmp_file"
     else
         chmod 0644 "$tmp_file"
     fi
@@ -251,19 +303,19 @@ elif [[ -f "$LMU_SETTINGS_ORG" ]]; then
     LMU_SETTINGS_TMP="$(mktemp "${LMU_SETTINGS_ORG%/*}/.Settings.JSON.tmp.XXXXXX")"
 
     if jq \
-      --arg qc1 "${QUICK_CHAT_1:-}" \
-      --arg qc2 "${QUICK_CHAT_2:-}" \
-      --arg qc3 "${QUICK_CHAT_3:-}" \
-      --arg qc4 "${QUICK_CHAT_4:-}" \
-      --arg qc5 "${QUICK_CHAT_5:-}" \
-      --arg qc6 "${QUICK_CHAT_6:-}" \
-      --arg qc7 "${QUICK_CHAT_7:-}" \
-      --arg qc8 "${QUICK_CHAT_8:-}" \
-      --arg qc9 "${QUICK_CHAT_9:-}" \
-      --arg qc10 "${QUICK_CHAT_10:-}" \
-      --arg qc11 "${QUICK_CHAT_11:-}" \
-      --arg qc12 "${QUICK_CHAT_12:-}" \
-      '.CHAT |= (
+        --arg qc1 "${QUICK_CHAT_1:-}" \
+        --arg qc2 "${QUICK_CHAT_2:-}" \
+        --arg qc3 "${QUICK_CHAT_3:-}" \
+        --arg qc4 "${QUICK_CHAT_4:-}" \
+        --arg qc5 "${QUICK_CHAT_5:-}" \
+        --arg qc6 "${QUICK_CHAT_6:-}" \
+        --arg qc7 "${QUICK_CHAT_7:-}" \
+        --arg qc8 "${QUICK_CHAT_8:-}" \
+        --arg qc9 "${QUICK_CHAT_9:-}" \
+        --arg qc10 "${QUICK_CHAT_10:-}" \
+        --arg qc11 "${QUICK_CHAT_11:-}" \
+        --arg qc12 "${QUICK_CHAT_12:-}" \
+        '.CHAT |= (
         if $qc1 != "" then . + {"Quick Chat #1": $qc1} else . end |
         if $qc2 != "" then . + {"Quick Chat #2": $qc2} else . end |
         if $qc3 != "" then . + {"Quick Chat #3": $qc3} else . end |
@@ -375,7 +427,7 @@ fi
 # and unreaped zombie 'Z' processes are ignored)
 pid_is_alive() {
     local pid="$1"
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+    [[ -n "$pid" ]] && kill -0 "$pid" 2> /dev/null || return 1
     if [[ -r "/proc/${pid}/stat" ]]; then
         local stat_line="" state_part=""
         IFS= read -r stat_line < "/proc/${pid}/stat" || return 1
@@ -397,7 +449,7 @@ helper_is_running() {
         if pid_is_alive "$pid"; then
             return 0
         fi
-    done < <(pgrep -x "$comm_name" 2>/dev/null || true)
+    done < <(pgrep -x "$comm_name" 2> /dev/null || true)
     return 1
 }
 
@@ -433,9 +485,9 @@ lmu_is_running() {
 
     local pids="" pid
     LMU_EXE_PID=""
-    pids="$(pgrep -x "Le Mans Ultimat" 2>/dev/null || true)"
+    pids="$(pgrep -x "Le Mans Ultimat" 2> /dev/null || true)"
     if [[ -z "$pids" ]]; then
-        pids="$(pgrep -f "Le Mans Ultimate\\.exe" 2>/dev/null || true)"
+        pids="$(pgrep -f "Le Mans Ultimate\\.exe" 2> /dev/null || true)"
     fi
     while IFS= read -r pid; do
         if pid_is_alive "$pid"; then
@@ -448,13 +500,9 @@ lmu_is_running() {
 
 # Helper: interruptible sleep inside orchestrate_helpers (wakes immediately on SIGTERM without stderr noise)
 orchestrate_sleep() {
-    local sleep_pid
-    sleep "$1" &
-    sleep_pid=$!
-    # shellcheck disable=SC2064
-    trap "kill -TERM $sleep_pid 2>/dev/null || true; exit 0" TERM INT
-    wait "$sleep_pid" 2>/dev/null || true
-    trap 'exit 0' TERM INT
+    # 'read -t' on a never-written pipe is a zero-fork sleep, and bash runs the
+    # TERM/INT trap (exit 0) immediately when interrupted.
+    read -r -t "$1" <> <(:) || true
 }
 
 # Helper: sleep in 1-second ticks, aborting immediately if LMU closes early
@@ -473,7 +521,7 @@ wait_while_lmu_running() {
 # Helper: wait until SECONDS reaches target_seconds since LMU started
 wait_until_lmu_elapsed() {
     local target_seconds="$1"
-    while (( SECONDS < target_seconds )); do
+    while ((SECONDS < target_seconds)); do
         if ! lmu_is_running; then
             return 1
         fi
@@ -490,8 +538,8 @@ HELPER_WINE_SYNC_ARGS=()
 load_wineserver_sync_env() {
     local target_prefix="${STEAM_COMPAT_DATA_PATH}/pfx"
     local target_real="$target_prefix"
-    if command -v realpath >/dev/null 2>&1; then
-        target_real="$(realpath "$target_prefix" 2>/dev/null || printf '%s' "$target_prefix")"
+    if command -v realpath > /dev/null 2>&1; then
+        target_real="$(realpath "$target_prefix" 2> /dev/null || printf '%s' "$target_prefix")"
     fi
 
     local ws_pid entry key val val_real
@@ -507,14 +555,14 @@ load_wineserver_sync_env() {
             case "$key" in
                 WINEPREFIX)
                     val_real="$val"
-                    if command -v realpath >/dev/null 2>&1; then
-                        val_real="$(realpath "$val" 2>/dev/null || printf '%s' "$val")"
+                    if command -v realpath > /dev/null 2>&1; then
+                        val_real="$(realpath "$val" 2> /dev/null || printf '%s' "$val")"
                     fi
                     if [[ "$val" == "$target_prefix" || "$val_real" == "$target_real" || "$val" == *"/compatdata/${LMU_APP_ID}/"* ]]; then
                         match_prefix=true
                     fi
                     ;;
-                WINEFSYNC|WINEESYNC|WINENTSYNC|PROTON_USE_NTSYNC|PROTON_NO_FSYNC|PROTON_NO_ESYNC)
+                WINEFSYNC | WINEESYNC | WINENTSYNC | PROTON_USE_NTSYNC | PROTON_NO_FSYNC | PROTON_NO_ESYNC)
                     sync_vars+=("${key}=${val}")
                     ;;
             esac
@@ -538,7 +586,7 @@ LMUSHM_PID=""
 ORCHESTRATOR_PID=""
 
 cleanup_helpers() {
-    mkdir "$CLEANUP_LOCK" 2>/dev/null || return 0
+    mkdir "$CLEANUP_LOCK" 2> /dev/null || return 0
 
     local cc_launcher_pid=""
     if [[ -r "$CC_LAUNCHER_PID_FILE" ]]; then
@@ -575,16 +623,16 @@ cleanup_helpers() {
         fi
     fi
 
-    if (( ${#running_labels[@]} > 0 )); then
+    if ((${#running_labels[@]} > 0)); then
         notify "Stopping helper processes: ${running_labels[*]}"
         if [[ "$stop_cc_launcher" == true ]]; then
-            kill -TERM "$cc_launcher_pid" 2>/dev/null || true
+            kill -TERM "$cc_launcher_pid" 2> /dev/null || true
         fi
         for target in "${running_wine[@]}"; do
-            pkill -TERM -x "$(helper_comm_name "$target")" 2>/dev/null || true
+            pkill -TERM -x "$(helper_comm_name "$target")" 2> /dev/null || true
         done
         if [[ "$stop_lmushm" == true ]]; then
-            kill -TERM "$LMUSHM_PID" 2>/dev/null || true
+            kill -TERM "$LMUSHM_PID" 2> /dev/null || true
         fi
 
         # Give helpers up to 3 seconds to save configs and close shared memory cleanly
@@ -610,12 +658,12 @@ cleanup_helpers() {
         # Force-kill anything still hanging the Wine prefix
         local failed_stop=()
         if [[ "$stop_cc_launcher" == true ]] && pid_is_alive "$cc_launcher_pid"; then
-            kill -KILL "$cc_launcher_pid" 2>/dev/null || true
+            kill -KILL "$cc_launcher_pid" 2> /dev/null || true
         fi
         for target in "${running_wine[@]}"; do
             if helper_is_running "$target"; then
                 debuglog "Force-killing lingering helper: $target"
-                pkill -KILL -x "$(helper_comm_name "$target")" 2>/dev/null || true
+                pkill -KILL -x "$(helper_comm_name "$target")" 2> /dev/null || true
                 sleep 0.1
                 if helper_is_running "$target"; then
                     failed_stop+=("$target")
@@ -624,14 +672,14 @@ cleanup_helpers() {
         done
         if [[ "$stop_lmushm" == true ]] && pid_is_alive "$LMUSHM_PID"; then
             debuglog "Force-killing lingering helper: ${LMUSHM_BIN##*/} (PID $LMUSHM_PID)"
-            kill -KILL "$LMUSHM_PID" 2>/dev/null || true
+            kill -KILL "$LMUSHM_PID" 2> /dev/null || true
             sleep 0.1
             if pid_is_alive "$LMUSHM_PID"; then
                 failed_stop+=("${LMUSHM_BIN##*/}")
             fi
         fi
 
-        if (( ${#failed_stop[@]} > 0 )); then
+        if ((${#failed_stop[@]} > 0)); then
             errlog "Failed to stop helper processes: ${failed_stop[*]}"
         else
             notify "Stopped helper processes: ${running_labels[*]}"
@@ -649,18 +697,18 @@ on_script_exit() {
 
     if [[ -d "$CLEANUP_LOCK" ]]; then
         if [[ -n "$ORCHESTRATOR_PID" ]]; then
-            wait "$ORCHESTRATOR_PID" 2>/dev/null || true
+            wait "$ORCHESTRATOR_PID" 2> /dev/null || true
         fi
     else
         cleanup_helpers
         if [[ -n "$ORCHESTRATOR_PID" ]]; then
-            kill -TERM "$ORCHESTRATOR_PID" 2>/dev/null || true
-            wait "$ORCHESTRATOR_PID" 2>/dev/null || true
+            kill -TERM "$ORCHESTRATOR_PID" 2> /dev/null || true
+            wait "$ORCHESTRATOR_PID" 2> /dev/null || true
         fi
     fi
 
     if [[ -n "$LMUSHM_PID" ]]; then
-        wait "$LMUSHM_PID" 2>/dev/null || true
+        wait "$LMUSHM_PID" 2> /dev/null || true
     fi
 
     rm -f -- "$LMUSHM_FIFO" "$CC_LAUNCHER_PID_FILE"
@@ -677,7 +725,7 @@ if [[ -n "${LMUSHM_BIN:-}" ]]; then
         notify "Starting lmushm..."
         rm -f -- "$LMUSHM_FIFO"
         mkfifo "$LMUSHM_FIFO"
-        "$LMUSHM_BIN" <>"$LMUSHM_FIFO" >"$LMUSHM_LOG" 2>&1 &
+        "$LMUSHM_BIN" <> "$LMUSHM_FIFO" > "$LMUSHM_LOG" 2>&1 &
         LMUSHM_PID=$!
         sleep 0.2
         if pid_is_alive "$LMUSHM_PID"; then
@@ -712,7 +760,10 @@ orchestrate_helpers() {
 
     # 2. Default T+10s (LMUBRIDGE_DELAY): Launch lmubridge via Proton wine64
     if [[ -n "${LMUBRIDGE_BIN:-}" ]]; then
-        wait_until_lmu_elapsed "$LMUBRIDGE_DELAY" || { cleanup_helpers; return 0; }
+        wait_until_lmu_elapsed "$LMUBRIDGE_DELAY" || {
+            cleanup_helpers
+            return 0
+        }
         [[ ${#HELPER_WINE_SYNC_ARGS[@]} -eq 0 ]] && load_wineserver_sync_env
         local lmubridge_log="${LOG_DIR}/lmubridge.log"
         rotate_log "$lmubridge_log"
@@ -726,10 +777,13 @@ orchestrate_helpers() {
             export WINEDEBUG="$helper_winedebug"
             export WINEDLLOVERRIDES="xalia.exe=d"
             exec "$ACTIVE_PROTON_DIR/files/bin/wine64" "$LMUBRIDGE_BIN" \
-                </dev/null >"$lmubridge_log" 2>&1
+                < /dev/null > "$lmubridge_log" 2>&1
         ) &
 
-        wait_while_lmu_running 1 || { cleanup_helpers; return 0; }
+        wait_while_lmu_running 1 || {
+            cleanup_helpers
+            return 0
+        }
         if helper_is_running "$LMUBRIDGE_BIN"; then
             notify "LMU Shared Memory Bridge started."
         else
@@ -739,7 +793,10 @@ orchestrate_helpers() {
 
     # 3. Default T+15s (LMUFFB_DELAY): Launch LMUFFB
     if [[ -n "${LMUFFB_BIN:-}" ]]; then
-        wait_until_lmu_elapsed "$LMUFFB_DELAY" || { cleanup_helpers; return 0; }
+        wait_until_lmu_elapsed "$LMUFFB_DELAY" || {
+            cleanup_helpers
+            return 0
+        }
         [[ ${#HELPER_WINE_SYNC_ARGS[@]} -eq 0 ]] && load_wineserver_sync_env
 
         local lmuffb_dir="${LMUFFB_BIN%/*}"
@@ -758,10 +815,13 @@ orchestrate_helpers() {
                 export WINEDEBUG="$helper_winedebug"
                 export WINEDLLOVERRIDES="xalia.exe=d"
                 exec "$ACTIVE_PROTON_DIR/files/bin/wine64" "./$lmuffb_exe" \
-                    </dev/null >"$lmuffb_log" 2>&1
+                    < /dev/null > "$lmuffb_log" 2>&1
             ) &
 
-            wait_while_lmu_running 1 || { cleanup_helpers; return 0; }
+            wait_while_lmu_running 1 || {
+                cleanup_helpers
+                return 0
+            }
             if helper_is_running "$LMUFFB_BIN"; then
                 notify "LMUFFB started."
             else
@@ -774,7 +834,10 @@ orchestrate_helpers() {
 
     # 4. Default T+35s (CREWCHIEF_DELAY): Launch CrewChief via protontricks-launch
     if [[ -n "${CREWCHIEF_BIN:-}" ]]; then
-        wait_until_lmu_elapsed "$CREWCHIEF_DELAY" || { cleanup_helpers; return 0; }
+        wait_until_lmu_elapsed "$CREWCHIEF_DELAY" || {
+            cleanup_helpers
+            return 0
+        }
         [[ ${#HELPER_WINE_SYNC_ARGS[@]} -eq 0 ]] && load_wineserver_sync_env
 
         local crewchief_log="${LOG_DIR}/crewchief.log"
@@ -809,12 +872,15 @@ orchestrate_helpers() {
             # Unset Steam/Proton/runtime variables injected by Steam or launch_lmu.env
             while IFS= read -r var; do
                 unset "$var"
-            done < <(compgen -e STEAM_ || true; compgen -e Steam || true)
+            done < <(
+                compgen -e STEAM_ || true
+                compgen -e Steam || true
+            )
 
             unset LD_PRELOAD LD_LIBRARY_PATH \
                 GSETTINGS_SCHEMA_DIR GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_PATH_1_0 \
                 WINE_GST_REGISTRY_DIR ENABLE_VULKAN_RENDERDOC_CAPTURE \
-                PROTON_PATH PROTON_LOG PROTON_USE_EAC_LINUX DXVK_ASYNC \
+                PROTON_PATH PROTON_LOG PROTON_USE_EAC_LINUX \
                 WINEPREFIX WINEARCH WINE WINESERVER WINELOADER WINEDLLPATH
 
             # Match wineserver sync primitives (including WINENTSYNC) and prevent
@@ -829,13 +895,13 @@ orchestrate_helpers() {
             export PROTON_VERSION="${PROTON_VERSION:-${ACTIVE_PROTON_DIR##*/}}"
 
             cc_locale="C.UTF-8"
-            if command -v locale >/dev/null 2>&1 && locale -a 2>/dev/null | grep -qi '^en_us\.utf-\?8$'; then
+            if command -v locale > /dev/null 2>&1 && locale -a 2> /dev/null | grep -qi '^en_us\.utf-\?8$'; then
                 cc_locale="en_US.UTF-8"
             fi
             export LC_ALL="$cc_locale" LANG="$cc_locale"
 
             exec protontricks-launch --no-runtime --appid "$LMU_APP_ID" "$CREWCHIEF_BIN" \
-                </dev/null >"$crewchief_log" 2>&1
+                < /dev/null > "$crewchief_log" 2>&1
         ) &
         local cc_launcher_pid=$!
         printf '%s\n' "$cc_launcher_pid" > "$CC_LAUNCHER_PID_FILE"
@@ -843,7 +909,7 @@ orchestrate_helpers() {
         # Wait up to CREWCHIEF_STARTUP_TIMEOUT seconds for the real CrewChiefV4.exe Wine process
         local cc_started=false
         local cc_wait=0
-        while (( cc_wait < CREWCHIEF_STARTUP_TIMEOUT )); do
+        while ((cc_wait < CREWCHIEF_STARTUP_TIMEOUT)); do
             if helper_is_running "$CREWCHIEF_BIN"; then
                 cc_started=true
                 break
@@ -884,7 +950,7 @@ ORCHESTRATOR_PID=$!
 # Keep the main game in the foreground
 notify "Starting Le Mans Ultimate..."
 if [[ "$USE_GAMEMODE" == true ]]; then
-    if command -v gamemoderun >/dev/null 2>&1; then
+    if command -v gamemoderun > /dev/null 2>&1; then
         LD_PRELOAD="$STEAM_LD_PRELOAD" gamemoderun "$@"
     else
         notify "gamemoderun not found; launching without GameMode." "low"

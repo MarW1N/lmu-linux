@@ -1,0 +1,4 @@
+# Helper launches intentionally run inside ( ... ) subshells that export their own
+# environment; SC2030/SC2031 ("modified in a subshell") are expected there.
+disable=SC2030,SC2031
+
